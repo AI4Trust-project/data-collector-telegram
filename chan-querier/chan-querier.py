@@ -421,19 +421,10 @@ def handler(context, event):
             status_code=200,
         )
 
-    except (
-        ChannelInvalidError,
-        ChannelPrivateError,
-        UsernameInvalidError,
-        ValueError,
-    ) as e:
-        # TODO What then?
-        # For all but ChannelPrivateError, can try with another key (TODO: add to
-        # list of new channels?).
+    except Exception as e:
         context.logger.warning(
             f"Could not get channel metadata from channel {channel_id}"
         )
-
         raise e
 
     # force garbage collection
