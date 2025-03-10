@@ -148,6 +148,16 @@ def upsert_channel(cur, channel):
     upsert(cur, "telegram.channels", ["id"], channel)
 
 
+def gen_query_info(query_time=None):
+    if query_time is None:
+        query_time = datetime.datetime.now().astimezone(datetime.timezone.utc)
+    return {
+        "query_id": str(uuid.uuid4()),
+        "query_date": query_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "data_owner": TELEGRAM_OWNER,
+    }
+
+
 def handler(context, event):
     # Triggered by chans_to_query
     nest_asyncio.apply()
