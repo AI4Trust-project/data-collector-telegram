@@ -211,13 +211,6 @@ def handler(context, event):
             else data.get("distance_from_core", 0)
         )
 
-        # number of participants collected from channel info
-        nr_participants = (
-            max(x.get("nr_participants", 0), data.get("nr_participants", 0))
-            if x
-            else data.get("nr_participants", 0)
-        )
-
         # LOOP avoidance: if already collected for the same search and fresh, skip
 
         # collect full info for channel
