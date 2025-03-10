@@ -210,20 +210,41 @@ def handler(context, event):
 
         # collect full info for channel
         query_time = datetime.datetime.now().astimezone(datetime.timezone.utc)
-        query_info = {
-            "query_id": str(uuid.uuid4()),
-            "query_date": query_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "data_owner": TELEGRAM_OWNER,
-        }
-
+        query_info = gen_query_info(query_time)
         context.logger.info(f"Collecting channel metadata from channel {channel_id}")
 
-        channel_full = collegram.channels.get_full(
-            client,
-            channel_username=data.get("username", None),
-            channel_id=data.get("id", None),
-            access_hash=data.get("access_hash", None),
-        )
+        try:
+            channel_full = collegram.channels.get_full(
+                client,
+                channel_username=channel_username,
+                channel_id=channel_id,
+                access_hash=access_hash,
+            )
+        except (
+            ChannelInvalidError,
+            ChannelPrivateError,
+            UsernameInvalidError,
+            ValueError,
+        ) as e:
+            # If multiple keys: for all but ChannelPrivateError, can try with another
+            # key
+            context.logger.warning(
+                f"Could not get channel metadata from channel {channel_id}"
+            )
+            if isinstance(e, ChannelPrivateError):
+                flat_channel_d = {
+                    "id": channel_id,
+                    "username": channel_username,
+                    "last_queried_at": query_time,
+                    "is_private": True,
+                    **query_info,
+                }
+                # send channel metadata to iceberg TODO
+                # producer.send(
+                #     "telegram.channel_metadata", value=iceberg_json_dumps(flat_channel_d)
+                # )
+            raise e
+
         channel_full_d = json.loads(channel_full.to_json())
 
         context.logger.debug(f"Detect language from channel {channel_id}")
