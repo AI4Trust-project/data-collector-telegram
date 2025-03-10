@@ -1,9 +1,8 @@
-import base64
 import datetime
+import gc
 import json
 import os
 import uuid
-from pathlib import Path
 
 import collegram
 import nest_asyncio
@@ -17,7 +16,6 @@ from telethon.errors import (
     UsernameInvalidError,
 )
 from telethon.sessions import StringSession
-import gc
 
 DB_NAME = os.environ.get("DATABASE_NAME")
 DB_USER = os.environ.get("DATABASE_USER")
@@ -150,11 +148,8 @@ def upsert_channel(cur, channel):
 
 
 def handler(context, event):
-
     # Triggered by chans_to_query
     nest_asyncio.apply()
-    # Keep, in future if we want to use more than 1 key, this is essential
-    key_name = TELEGRAM_OWNER
     # Set relative priority for project's languages. Since the language detection is
     # surely not 100% reliable, have to allow for popular channels not detected as using
     # these to be collectable.
