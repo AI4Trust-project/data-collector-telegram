@@ -265,12 +265,6 @@ def handler(context, event):
         lang_code = collegram.text.detect_chan_lang(channel_full_d, lang_detector)
         context.logger.debug(f"language {lang_code} for channel {channel_id}")
 
-        # Order chats such that one corresponding to channel_full is first, so we don't
-        # query it twice
-        chats = [c for c in channel_full.chats if c.id == channel_id] + [
-            c for c in channel_full.chats if c.id != channel_id
-        ]
-
         # keep track of search
         base = {
             "search_id": data.get("search_id", None),
@@ -278,22 +272,31 @@ def handler(context, event):
             "keyword": data.get("keyword", None),
         }
 
-        # record an entry per chat as channel_id,chat_id
-        for chat in chats:
-            context.logger.info(f"Collecting channel {channel_id} chat {chat.id}")
+        # Order chats such that one corresponding to channel_full is first, so we don't
+        # query it twice
+        chats = [c for c in channel_full.chats if c.id == channel_id] + [
+            c for c in channel_full.chats if c.id != channel_id
+        ]
+        for i, chat in enumerate(chats):
+            context.logger.info(f"## Collecting chat metadata for chat {chat.id}")
+            if i > 0:
+                query_time = datetime.datetime.now().astimezone(datetime.timezone.utc)
+                query_info = gen_query_info(query_time)
+                channel_full = collegram.channels.get_full(
+                    client,
+                    channel=chat,
+                )
 
-            chat_d = chat.to_dict()
+            channel_full_d = json.loads(channel_full.to_json())
+
+            chat_d = collegram.channels.flatten_dict(channel_full_d)
             channel_chat = {
                 "id": chat_d["id"],
                 "channel_id": channel_id,
                 "access_hash": chat_d["access_hash"],
                 "title": chat_d["title"],
                 "username": chat_d["username"],
-                "nr_participants": (
-                    nr_participants
-                    if chat_d["participants_count"] is None
-                    else chat_d["participants_count"]
-                ),
+                "nr_participants": chat_d["nr_participants"],
                 "distance_from_core": distance_from_core,
                 "language_code": (
                     data.get("username") if lang_code is None else lang_code
