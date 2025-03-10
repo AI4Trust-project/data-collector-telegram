@@ -23,6 +23,7 @@ DB_PASSWORD = os.environ.get("DATABASE_PASSWORD")
 DB_HOST = os.environ.get("DATABASE_HOST")
 TELEGRAM_OWNER = os.environ["TELEGRAM_OWNER"]
 
+RELS_TABLE = "telegram.channels_rels"
 WAIT_INTERVAL = 60 * 60 * 24  # 24 hours
 
 
@@ -135,7 +136,7 @@ def upsert(cur, table, pk_fields, kwargs):
 
 def upsert_recommended(cur, source, dest, query_time):
     cur.execute(
-        "INSERT INTO telegram.channels_rels (source, destination,relation, first_discovered, last_discovered) "
+        f"INSERT INTO {RELS_TABLE} (source, destination,relation, first_discovered, last_discovered) "
         f" VALUES({source},{dest},'recommended',%s,%s) "
         " ON CONFLICT(source, destination) "
         f" DO UPDATE SET last_discovered=%s",
@@ -188,7 +189,7 @@ def handler(context, event):
             # count incoming relations to evaluate priority
             nr_forwarding_channels = count(
                 cur,
-                "telegram.channels_rels",
+                RELS_TABLE,
                 {
                     "destination": channel_id,
                     "relation": "forwarded",
@@ -196,7 +197,7 @@ def handler(context, event):
             )
             nr_recommending_channels = count(
                 cur,
-                "telegram.channels_rels",
+                RELS_TABLE,
                 {
                     "destination": channel_id,
                     "relation": "recommended",
@@ -204,7 +205,7 @@ def handler(context, event):
             )
             nr_linking_channels = count(
                 cur,
-                "telegram.channels_rels",
+                RELS_TABLE,
                 {
                     "destination": channel_id,
                     "relation": "linked",
@@ -354,7 +355,7 @@ def handler(context, event):
                 with connection.cursor() as cur:
                     z = get(
                         cur,
-                        "telegram.channels_rels",
+                        RELS_TABLE,
                         ["source", "destination", "last_discovered"],
                         {
                             "source": channel_id,
