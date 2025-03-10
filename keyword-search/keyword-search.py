@@ -1,17 +1,15 @@
 import datetime
 import json
 import os
+import time
 import uuid
 from datetime import timezone
-import time
 
 import nest_asyncio
 import psycopg
 from kafka import KafkaProducer
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-
-
 from telethon.tl.functions.contacts import SearchRequest
 
 DB_NAME = os.environ.get("DATABASE_NAME")
@@ -97,14 +95,6 @@ def handler(context, event):
     producer = context.producer
     client = context.client
 
-    # Connect to an existing database
-    connection = psycopg.connect(
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        dbname=DB_NAME,
-    )
-
     kid = None
 
     body = event.body.decode("utf-8")
@@ -113,7 +103,13 @@ def handler(context, event):
         if "keyword_id" in parameters:
             kid = int(parameters["keyword_id"])
 
-    keywords_data = get_keywords(connection, kid)
+    with psycopg.connect(
+        user=DB_USER,
+        password=DB_PASSWORD,
+        host=DB_HOST,
+        dbname=DB_NAME,
+    ) as connection:
+        keywords_data = get_keywords(connection, kid)
 
     context.logger.info(" Started keyword search")
     for keyword in keywords_data:
@@ -178,9 +174,6 @@ def handler(context, event):
         except Exception as e:
             context.logger.error(f"Error with search for keyword: {e}")
             continue
-
-    # close connection
-    connection.close()
 
     return context.Response(
         body=f"Run search for channels",
