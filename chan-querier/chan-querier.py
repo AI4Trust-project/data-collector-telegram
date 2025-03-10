@@ -211,147 +211,147 @@ def handler(context, event):
                 },
             )
 
-            # distance from search core, as in number of hops
-            distance_from_core = (
-                min(x.get("distance_from_core", 0), data.get("distance_from_core", 0))
-                if x
-                else data.get("distance_from_core", 0)
-            )
+        # distance from search core, as in number of hops
+        distance_from_core = (
+            min(x.get("distance_from_core", 0), data.get("distance_from_core", 0))
+            if x
+            else data.get("distance_from_core", 0)
+        )
 
-            # number of participants collected from channel info
-            nr_participants = (
-                max(x.get("nr_participants", 0), data.get("nr_participants", 0))
-                if x
-                else data.get("nr_participants", 0)
-            )
+        # number of participants collected from channel info
+        nr_participants = (
+            max(x.get("nr_participants", 0), data.get("nr_participants", 0))
+            if x
+            else data.get("nr_participants", 0)
+        )
 
-            # LOOP avoidance: if already collected for the same search and fresh, skip
+        # LOOP avoidance: if already collected for the same search and fresh, skip
 
-            # collect full info for channel
-            query_time = datetime.datetime.now().astimezone(datetime.timezone.utc)
-            query_info = {
-                "query_id": str(uuid.uuid4()),
-                "query_date": query_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "data_owner": TELEGRAM_OWNER,
+        # collect full info for channel
+        query_time = datetime.datetime.now().astimezone(datetime.timezone.utc)
+        query_info = {
+            "query_id": str(uuid.uuid4()),
+            "query_date": query_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "data_owner": TELEGRAM_OWNER,
+        }
+
+        context.logger.info(f"Collecting channel metadata from channel {channel_id}")
+
+        channel_full = collegram.channels.get_full(
+            client,
+            channel_username=data.get("username", None),
+            channel_id=data.get("id", None),
+            access_hash=data.get("access_hash", None),
+        )
+        channel_full_d = json.loads(channel_full.to_json())
+
+        context.logger.debug(f"Detect language from channel {channel_id}")
+
+        # language detection on text
+        lang_code = collegram.text.detect_chan_lang(channel_full_d, lang_detector)
+        context.logger.debug(f"language {lang_code} for channel {channel_id}")
+
+        # Order chats such that one corresponding to channel_full is first, so we don't
+        # query it twice
+        chats = [c for c in channel_full.chats if c.id == channel_id] + [
+            c for c in channel_full.chats if c.id != channel_id
+        ]
+
+        # keep track of search
+        base = {
+            "search_id": data.get("search_id", None),
+            "keyword_id": data.get("keyword_id", None),
+            "keyword": data.get("keyword", None),
+        }
+
+        # record an entry per chat as channel_id,chat_id
+        for chat in chats:
+            context.logger.info(f"Collecting channel {channel_id} chat {chat.id}")
+
+            chat_d = chat.to_dict()
+            channel_chat = {
+                "id": chat_d["id"],
+                "channel_id": channel_id,
+                "access_hash": chat_d["access_hash"],
+                "title": chat_d["title"],
+                "username": chat_d["username"],
+                "nr_participants": (
+                    nr_participants
+                    if chat_d["participants_count"] is None
+                    else chat_d["participants_count"]
+                ),
+                "distance_from_core": distance_from_core,
+                "language_code": (
+                    data.get("username") if lang_code is None else lang_code
+                ),
             }
 
-            context.logger.info(
-                f"Collecting channel metadata from channel {channel_id}"
+            # message counts
+            # DISABLED! this READS all messages!!
+            # context.logger.debug(
+            #     f"Collecting channel {channel_id} chat {chat.id} message counts"
+            # )
+            # counts = {
+            #     k: v
+            #     for k, v in [
+            #         [
+            #             f"{content_type}_count",
+            #             collegram.messages.get_channel_messages_count(
+            #                 client, chat, f
+            #             ),
+            #         ]
+            #         for content_type, f in collegram.messages.MESSAGE_CONTENT_TYPE_MAP.items()
+            #     ]
+            # }
+
+            row = base.copy() | query_info.copy() | channel_chat  # | counts
+
+            # recommended
+            context.logger.debug(
+                f"Collecting channel {channel_id} chat {chat.id} recommended"
+            )
+            recommended_chans = collegram.channels.get_recommended(client, chat)
+            row["nr_recommended"] = len(recommended_chans)
+
+            # (re)evaluate collection priority
+            lifespan_seconds = (
+                chat.date.replace(tzinfo=None) - query_time.replace(tzinfo=None)
+            ).total_seconds()
+
+            context.logger.debug(
+                f"Evaluate channel {channel_id} chat {chat.id} priority"
+            )
+            priority = collegram.channels.get_explo_priority(
+                channel_chat["language_code"],
+                1,  # counts.get("message_count", 0),
+                chat.participants_count,
+                lifespan_seconds,
+                distance_from_core,
+                nr_forwarding_channels,
+                nr_recommending_channels,
+                nr_linking_channels,
+                lang_priorities,
+                acty_slope=5,
             )
 
-            channel_full = collegram.channels.get_full(
-                client,
-                channel_username=data.get("username", None),
-                channel_id=data.get("id", None),
-                access_hash=data.get("access_hash", None),
+            row["collection_priority"] = priority
+
+            context.logger.debug(
+                f"row: {json.dumps(row, default=_iceberg_json_default)}"
             )
-            channel_full_d = json.loads(channel_full.to_json())
 
-            context.logger.debug(f"Detect language from channel {channel_id}")
-
-            # language detection on text
-            lang_code = collegram.text.detect_chan_lang(channel_full_d, lang_detector)
-            context.logger.debug(f"language {lang_code} for channel {channel_id}")
-
-            # Order chats such that one corresponding to channel_full is first, so we don't
-            # query it twice
-            chats = [c for c in channel_full.chats if c.id == channel_id] + [
-                c for c in channel_full.chats if c.id != channel_id
-            ]
-
-            # keep track of search
-            base = {
-                "search_id": data.get("search_id", None),
-                "keyword_id": data.get("keyword_id", None),
-                "keyword": data.get("keyword", None),
-            }
-
-            # record an entry per chat as channel_id,chat_id
-            for chat in chats:
-                context.logger.info(f"Collecting channel {channel_id} chat {chat.id}")
-
-                chat_d = chat.to_dict()
-                channel_chat = {
-                    "id": chat_d["id"],
-                    "channel_id": channel_id,
-                    "access_hash": chat_d["access_hash"],
-                    "title": chat_d["title"],
-                    "username": chat_d["username"],
-                    "nr_participants": (
-                        nr_participants
-                        if chat_d["participants_count"] is None
-                        else chat_d["participants_count"]
-                    ),
-                    "distance_from_core": distance_from_core,
-                    "language_code": (
-                        data.get("username") if lang_code is None else lang_code
-                    ),
-                }
-
-                # message counts
-                # DISABLED! this READS all messages!!
-                # context.logger.debug(
-                #     f"Collecting channel {channel_id} chat {chat.id} message counts"
-                # )
-                # counts = {
-                #     k: v
-                #     for k, v in [
-                #         [
-                #             f"{content_type}_count",
-                #             collegram.messages.get_channel_messages_count(
-                #                 client, chat, f
-                #             ),
-                #         ]
-                #         for content_type, f in collegram.messages.MESSAGE_CONTENT_TYPE_MAP.items()
-                #     ]
-                # }
-
-                row = base.copy() | query_info.copy() | channel_chat  # | counts
-
-                # recommended
-                context.logger.debug(
-                    f"Collecting channel {channel_id} chat {chat.id} recommended"
-                )
-                recommended_chans = collegram.channels.get_recommended(client, chat)
-                row["nr_recommended"] = len(recommended_chans)
-
-                # (re)evaluate collection priority
-                lifespan_seconds = (
-                    chat.date.replace(tzinfo=None) - query_time.replace(tzinfo=None)
-                ).total_seconds()
-
-                context.logger.debug(
-                    f"Evaluate channel {channel_id} chat {chat.id} priority"
-                )
-                priority = collegram.channels.get_explo_priority(
-                    channel_chat["language_code"],
-                    1,  # counts.get("message_count", 0),
-                    chat.participants_count,
-                    lifespan_seconds,
-                    distance_from_core,
-                    nr_forwarding_channels,
-                    nr_recommending_channels,
-                    nr_linking_channels,
-                    lang_priorities,
-                    acty_slope=5,
-                )
-
-                row["collection_priority"] = priority
-
-                context.logger.debug(
-                    f"row: {json.dumps(row, default=_iceberg_json_default)}"
-                )
-
-                # write channel info to postgres
+            # write channel info to postgres
+            with connection.cursor() as cur:
                 upsert_channel(cur, row)
 
-                # forward recommended to querier
-                for recommended in recommended_chans:
-                    context.logger.debug(
-                        f"Process channel {channel_id} chat {chat.id} recommended {recommended.id}"
-                    )
+            # forward recommended to querier
+            for recommended in recommended_chans:
+                context.logger.debug(
+                    f"Process channel {channel_id} chat {chat.id} recommended {recommended.id}"
+                )
 
-                    # check if exists and fresh to avoid loops between peers
+                # check if exists and fresh to avoid loops between peers
+                with connection.cursor() as cur:
                     z = get(
                         cur,
                         "telegram.channels_rels",
@@ -363,54 +363,53 @@ def handler(context, event):
                         },
                     )
 
-                    if (
-                        not z
-                        or (query_time - z["last_discovered"]).total_seconds()
-                        > WAIT_INTERVAL
-                    ):
-                        context.logger.debug(
-                            f"Record channel {channel_id} chat {chat.id} recommended {recommended.id}"
-                        )
+                if (
+                    not z
+                    or (query_time - z["last_discovered"]).total_seconds()
+                    > WAIT_INTERVAL
+                ):
+                    context.logger.debug(
+                        f"Record channel {channel_id} chat {chat.id} recommended {recommended.id}"
+                    )
 
-                        # split recommended into table to obtain an adjacency matrix
+                    # split recommended into table to obtain an adjacency matrix
+                    with connection.cursor() as cur:
                         upsert_recommended(
                             cur,
                             channel_id,
                             recommended.id,
                             query_time,
                         )
-                        #  send to querier
-                        message = base.copy() | {
-                            "id": recommended.id,
-                            "access_hash": recommended.access_hash,
-                            "title": recommended.title,
-                            "username": recommended.username,
-                            "nr_participants": recommended.participants_count,
-                            "distance_from_core": distance_from_core + 1,
-                        }
+                    #  send to querier
+                    message = base.copy() | {
+                        "id": recommended.id,
+                        "access_hash": recommended.access_hash,
+                        "title": recommended.title,
+                        "username": recommended.username,
+                        "nr_participants": recommended.participants_count,
+                        "distance_from_core": distance_from_core + 1,
+                    }
 
-                        # NOTE: this breaks on loops: if we get the same channel from the same search
-                        # via another source the messages will collide
-                        # TODO handle, for now we let it break to avoid duplicates
-                        msg_key = message["search_id"] + "|" + str(message["id"])
+                    # NOTE: this breaks on loops: if we get the same channel from the same search
+                    # via another source the messages will collide
+                    # TODO handle, for now we let it break to avoid duplicates
+                    msg_key = message["search_id"] + "|" + str(message["id"])
 
-                        producer.send(
-                            "telegram.channels_to_query",
-                            key=msg_key,
-                            value=json.loads(json.dumps(message)),
-                        )
+                    producer.send(
+                        "telegram.channels_to_query",
+                        key=msg_key,
+                        value=json.loads(json.dumps(message)),
+                    )
 
-            # done.
-            context.logger.info(
-                f"Channel {channel_id} info collected, {len(chats)} chats"
-            )
+        # done.
+        context.logger.info(f"Channel {channel_id} info collected, {len(chats)} chats")
 
-            return context.Response(
-                body=f"Channel {channel_id} info collected",
-                headers={},
-                content_type="text/plain",
-                status_code=200,
-            )
+        return context.Response(
+            body=f"Channel {channel_id} info collected",
+            headers={},
+            content_type="text/plain",
+            status_code=200,
+        )
 
     except (
         ChannelInvalidError,
