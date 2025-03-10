@@ -187,30 +187,10 @@ def handler(context, event):
             )
 
             # count incoming relations to evaluate priority
-            nr_forwarding_channels = count(
-                cur,
-                RELS_TABLE,
-                {
-                    "destination": channel_id,
-                    "relation": "forwarded",
-                },
-            )
-            nr_recommending_channels = count(
-                cur,
-                RELS_TABLE,
-                {
-                    "destination": channel_id,
-                    "relation": "recommended",
-                },
-            )
-            nr_linking_channels = count(
-                cur,
-                RELS_TABLE,
-                {
-                    "destination": channel_id,
-                    "relation": "linked",
-                },
-            )
+            nr_forwarding_channels, nr_linking_channels, nr_recommending_channels = [
+                count(cur, RELS_TABLE, {"destination": channel_id, "relation": rel})
+                for rel in ("forwarded", "linked", "recommended")
+            ]
 
         # distance from search core, as in number of hops
         distance_from_core = (
