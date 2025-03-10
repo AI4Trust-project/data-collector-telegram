@@ -179,6 +179,8 @@ def handler(context, event):
         data = json.loads(event.body.decode("utf-8"))
 
         channel_id = data.get("id")
+        access_hash = data.get("access_hash")
+        channel_username = data.get("username")
         context.logger.debug(f"Receive channel data for channel {channel_id}")
 
         # read from db to merge with prev values
