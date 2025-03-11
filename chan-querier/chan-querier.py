@@ -294,7 +294,7 @@ def handler(context, event):
                 channel_full_d = src_channel_full_d
 
             query_time = query_info["query_time"]
-
+            channel_full_d.pop("users", None)
             chat_d = collegram.channels.flatten_dict(channel_full_d)
 
             if chat.id == parent_channel.id:
