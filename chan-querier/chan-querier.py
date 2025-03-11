@@ -257,12 +257,12 @@ def handler(context, event):
                 # )
             raise e
 
-        channel_full_d = json.loads(channel_full.to_json())
+        src_channel_full_d = json.loads(channel_full.to_json())
 
         context.logger.debug(f"Detect language from channel {source_channel_id}")
 
         # language detection on text
-        lang_code = collegram.text.detect_chan_lang(channel_full_d, lang_detector)
+        lang_code = collegram.text.detect_chan_lang(src_channel_full_d, lang_detector)
         context.logger.debug(f"language {lang_code} for channel {source_channel_id}")
 
         # keep track of search
@@ -293,6 +293,7 @@ def handler(context, event):
                 channel_full_d = json.loads(channel_full.to_json())
             else:
                 query_info = src_query_info
+                channel_full_d = src_channel_full_d
 
             query_time = query_info["query_time"]
             chat_d = collegram.channels.flatten_dict(channel_full_d)
