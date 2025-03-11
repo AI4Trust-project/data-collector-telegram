@@ -1,7 +1,9 @@
 CREATE TABLE
     IF NOT EXISTS telegram.channels_rels (
         source BIGINT,
+        source_parent BIGINT,
         destination BIGINT,
+        destination_parent BIGINT,
         relation VARCHAR(20),
         nr_messages BIGINT,
         first_discovered TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,

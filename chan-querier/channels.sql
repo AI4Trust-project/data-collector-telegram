@@ -1,7 +1,8 @@
 CREATE TABLE
     IF NOT EXISTS telegram.channels (
         id BIGINT NOT NULL,
-        channel_id BIGINT NOT NULL,
+        source_channel_id BIGINT NOT NULL,
+        parent_channel_id BIGINT NOT NULL,
         access_hash BIGINT NOT NULL,
         data_owner VARCHAR(255),
         title VARCHAR(255),

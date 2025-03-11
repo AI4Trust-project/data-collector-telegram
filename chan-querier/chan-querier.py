@@ -178,10 +178,11 @@ def handler(context, event):
         # NOTE: we need to avoid looping between peers!
         data = json.loads(event.body.decode("utf-8"))
 
-        channel_id = data.get("id")
+        source_channel_id = data.get("id")
+        parent_channel_id = data.get("parent_channel_id")
         access_hash = data.get("access_hash")
         channel_username = data.get("username")
-        context.logger.debug(f"Receive channel data for channel {channel_id}")
+        context.logger.debug(f"Receive channel data for channel {source_channel_id}")
 
         # read from db to merge with prev values
         with connection.cursor() as cur:
@@ -195,12 +196,16 @@ def handler(context, event):
                     "distance_from_core",
                     "nr_participants",
                 ],
-                {"id": channel_id},
+                {"id": source_channel_id},
             )
 
             # count incoming relations to evaluate priority
             nr_forwarding_channels, nr_linking_channels, nr_recommending_channels = [
-                count(cur, RELS_TABLE, {"destination": channel_id, "relation": rel})
+                count(
+                    cur,
+                    RELS_TABLE,
+                    {"destination_parent": parent_channel_id, "relation": rel},
+                )
                 for rel in ("forwarded", "linked", "recommended")
             ]
 
@@ -216,13 +221,15 @@ def handler(context, event):
         # collect full info for channel
         query_time = datetime.datetime.now().astimezone(datetime.timezone.utc)
         query_info = gen_query_info(query_time)
-        context.logger.info(f"Collecting channel metadata from channel {channel_id}")
+        context.logger.info(
+            f"Collecting channel metadata from channel {source_channel_id}"
+        )
 
         try:
             channel_full = collegram.channels.get_full(
                 client,
                 channel_username=channel_username,
-                channel_id=channel_id,
+                channel_id=source_channel_id,
                 access_hash=access_hash,
             )
         except (
@@ -234,11 +241,11 @@ def handler(context, event):
             # If multiple keys: for all but ChannelPrivateError, can try with another
             # key
             context.logger.warning(
-                f"Could not get channel metadata from channel {channel_id}"
+                f"Could not get channel metadata from channel {source_channel_id}"
             )
             if isinstance(e, ChannelPrivateError):
                 flat_channel_d = {
-                    "id": channel_id,
+                    "id": source_channel_id,
                     "username": channel_username,
                     "last_queried_at": query_time,
                     "is_private": True,
@@ -252,11 +259,11 @@ def handler(context, event):
 
         channel_full_d = json.loads(channel_full.to_json())
 
-        context.logger.debug(f"Detect language from channel {channel_id}")
+        context.logger.debug(f"Detect language from channel {source_channel_id}")
 
         # language detection on text
         lang_code = collegram.text.detect_chan_lang(channel_full_d, lang_detector)
-        context.logger.debug(f"language {lang_code} for channel {channel_id}")
+        context.logger.debug(f"language {lang_code} for channel {source_channel_id}")
 
         # keep track of search
         base = {
@@ -265,29 +272,33 @@ def handler(context, event):
             "keyword": data.get("keyword", None),
         }
 
-        # Order chats such that one corresponding to channel_full is first, so we don't
-        # query it twice
-        chats = [c for c in channel_full.chats if c.id == channel_id] + [
-            c for c in channel_full.chats if c.id != channel_id
-        ]
-        for i, chat in enumerate(chats):
+        chats = channel_full.chats
+        parent_channel = chats[0]
+        for c in chats:
+            # If channelFull has more than one chat, this condition should be met for a
+            # single chat. Else, channelFull corresponds to a public supergroup, and we
+            # consider this discussion chat to be its own parent.
+            if c.broadcast:
+                parent_channel = c
+
+        for chat in chats:
             context.logger.info(f"## Collecting chat metadata for chat {chat.id}")
-            if i > 0:
+            # Query only if necessary.
+            if chat.id != source_channel_id:
                 query_time = datetime.datetime.now().astimezone(datetime.timezone.utc)
                 query_info = gen_query_info(query_time)
                 channel_full = collegram.channels.get_full(
                     client,
                     channel=chat,
                 )
-
-            channel_full_d = json.loads(channel_full.to_json())
+                channel_full_d = json.loads(channel_full.to_json())
 
             chat_d = collegram.channels.flatten_dict(channel_full_d)
             channel_chat = {
                 "id": chat_d["id"],
-                "channel_id": channel_id,
+                "parent_channel_id": parent_channel.id,
+                "source_channel_id": source_channel_id,
                 "access_hash": chat_d["access_hash"],
-                "title": chat_d["title"],
                 "username": chat_d["username"],
                 "nr_participants": chat_d["nr_participants"],
                 "distance_from_core": distance_from_core,
@@ -318,10 +329,9 @@ def handler(context, event):
 
             # recommended
             context.logger.debug(
-                f"Collecting channel {channel_id} chat {chat.id} recommended"
+                f"Collecting channel {source_channel_id} chat {chat.id} recommended"
             )
             recommended_chans = collegram.channels.get_recommended(client, chat)
-            row["nr_recommended"] = len(recommended_chans)
 
             # (re)evaluate collection priority
             lifespan_seconds = (
@@ -329,7 +339,7 @@ def handler(context, event):
             ).total_seconds()
 
             context.logger.debug(
-                f"Evaluate channel {channel_id} chat {chat.id} priority"
+                f"Evaluate channel {source_channel_id} chat {chat.id} priority"
             )
             priority = collegram.channels.get_explo_priority(
                 channel_chat["language_code"],
@@ -357,7 +367,7 @@ def handler(context, event):
             # forward recommended to querier
             for recommended in recommended_chans:
                 context.logger.debug(
-                    f"Process channel {channel_id} chat {chat.id} recommended {recommended.id}"
+                    f"Process channel {source_channel_id} chat {chat.id} recommended {recommended.id}"
                 )
 
                 # check if exists and fresh to avoid loops between peers
@@ -379,14 +389,14 @@ def handler(context, event):
                     > WAIT_INTERVAL
                 ):
                     context.logger.debug(
-                        f"Record channel {channel_id} chat {chat.id} recommended {recommended.id}"
+                        f"Record channel {source_channel_id} chat {chat.id} recommended {recommended.id}"
                     )
 
                     # split recommended into table to obtain an adjacency matrix
                     with connection.cursor() as cur:
                         upsert_recommended(
                             cur,
-                            channel_id,
+                            chat.id,
                             recommended.id,
                             query_time,
                         )
@@ -412,10 +422,12 @@ def handler(context, event):
                     )
 
         # done.
-        context.logger.info(f"Channel {channel_id} info collected, {len(chats)} chats")
+        context.logger.info(
+            f"Channel {source_channel_id} info collected, {len(chats)} chats"
+        )
 
         return context.Response(
-            body=f"Channel {channel_id} info collected",
+            body=f"Channel {source_channel_id} info collected",
             headers={},
             content_type="text/plain",
             status_code=200,
@@ -423,7 +435,7 @@ def handler(context, event):
 
     except Exception as e:
         context.logger.warning(
-            f"Could not get channel metadata from channel {channel_id}"
+            f"Could not get channel metadata from channel {source_channel_id}"
         )
         raise e
 
