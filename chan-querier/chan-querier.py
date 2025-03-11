@@ -219,8 +219,7 @@ def handler(context, event):
         # LOOP avoidance: if already collected for the same search and fresh, skip
 
         # collect full info for channel
-        query_time = datetime.datetime.now().astimezone(datetime.timezone.utc)
-        query_info = gen_query_info(query_time)
+        src_query_info = gen_query_info()
         context.logger.info(
             f"Collecting channel metadata from channel {source_channel_id}"
         )
@@ -248,9 +247,9 @@ def handler(context, event):
                 flat_channel_d = {
                     "id": source_channel_id,
                     "username": channel_username,
-                    "last_queried_at": query_time,
+                    "last_queried_at": src_query_info["query_time"],
                     "is_private": True,
-                    **query_info,
+                    **src_query_info,
                 }
                 # send channel metadata to iceberg TODO
                 # producer.send(
@@ -286,14 +285,16 @@ def handler(context, event):
             context.logger.info(f"## Collecting chat metadata for chat {chat.id}")
             # Query only if necessary.
             if chat.id != source_channel_id:
-                query_time = datetime.datetime.now().astimezone(datetime.timezone.utc)
-                query_info = gen_query_info(query_time)
+                query_info = gen_query_info()
                 channel_full = collegram.channels.get_full(
                     client,
                     channel=chat,
                 )
                 channel_full_d = json.loads(channel_full.to_json())
+            else:
+                query_info = src_query_info
 
+            query_time = query_info["query_time"]
             chat_d = collegram.channels.flatten_dict(channel_full_d)
             channel_chat = {
                 "id": chat_d["id"],
