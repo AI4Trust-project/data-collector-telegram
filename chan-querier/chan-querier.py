@@ -334,17 +334,10 @@ def handler(context, event):
 
             row = base.copy() | query_info.copy() | channel_chat  # | counts
 
-            # recommended
-            context.logger.debug(
-                f"Collecting channel {source_channel_id} chat {chat.id} recommended"
-            )
-            recommended_chans = collegram.channels.get_recommended(client, chat)
-
             # (re)evaluate collection priority
             lifespan_seconds = (
                 chat.date.replace(tzinfo=None) - query_time.replace(tzinfo=None)
             ).total_seconds()
-
             context.logger.debug(
                 f"Evaluate channel {source_channel_id} chat {chat.id} priority"
             )
@@ -360,17 +353,20 @@ def handler(context, event):
                 lang_priorities,
                 acty_slope=5,
             )
-
             row["collection_priority"] = priority
 
+            # write channel info to postgres
             context.logger.debug(
                 f"row: {json.dumps(row, default=_iceberg_json_default)}"
             )
-
-            # write channel info to postgres
             with connection.cursor() as cur:
                 upsert_channel(cur, row)
 
+            # recommended
+            context.logger.debug(
+                f"Collecting channel {source_channel_id} chat {chat.id} recommended"
+            )
+            recommended_chans = collegram.channels.get_recommended(client, chat)
             # forward recommended to querier
             for recommended in recommended_chans:
                 context.logger.debug(
