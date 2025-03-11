@@ -261,10 +261,6 @@ def handler(context, event):
 
         context.logger.debug(f"Detect language from channel {source_channel_id}")
 
-        # language detection on text
-        lang_code = collegram.text.detect_chan_lang(src_channel_full_d, lang_detector)
-        context.logger.debug(f"language {lang_code} for channel {source_channel_id}")
-
         # keep track of search
         base = {
             "search_id": data.get("search_id", None),
@@ -280,6 +276,8 @@ def handler(context, event):
             # consider this discussion chat to be its own parent.
             if c.broadcast:
                 parent_channel = c
+        # Place parent channel first to attribute its language to its children.
+        chats = [parent_channel] + [c for c in chats if c.id != parent_channel.id]
 
         for chat in chats:
             context.logger.info(f"## Collecting chat metadata for chat {chat.id}")
@@ -296,9 +294,16 @@ def handler(context, event):
                 channel_full_d = src_channel_full_d
 
             query_time = query_info["query_time"]
+
             chat_d = collegram.channels.flatten_dict(channel_full_d)
+
+            if chat.id == parent_channel.id:
+                # language detection on text
+                lang_code = collegram.text.detect_chan_lang(channel_full_d, lang_detector)
+                context.logger.debug(f"language {lang_code} for channel {source_channel_id}")
+
             channel_chat = {
-                "id": chat_d["id"],
+                "id": chat.id,
                 "parent_channel_id": parent_channel.id,
                 "source_channel_id": source_channel_id,
                 "access_hash": chat_d["access_hash"],
@@ -306,7 +311,7 @@ def handler(context, event):
                 "nr_participants": chat_d["nr_participants"],
                 "distance_from_core": distance_from_core,
                 # TODO: wtf?
-                "language_code": (channel_username if lang_code is None else lang_code),
+                "language_code": lang_code,
             }
 
             # message counts
@@ -379,7 +384,7 @@ def handler(context, event):
                         RELS_TABLE,
                         ["source", "destination", "last_discovered"],
                         {
-                            "source": channel_id,
+                            "source_parent": parent_channel.id,
                             "destination": recommended.id,
                             "relation": "recommended",
                         },
