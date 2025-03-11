@@ -406,7 +406,6 @@ def handler(context, event):
                     message = base.copy() | {
                         "id": recommended.id,
                         "access_hash": recommended.access_hash,
-                        "title": recommended.title,
                         "username": recommended.username,
                         "nr_participants": recommended.participants_count,
                         "distance_from_core": distance_from_core + 1,
