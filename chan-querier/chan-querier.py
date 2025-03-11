@@ -240,6 +240,7 @@ def handler(context, event):
         ) as e:
             # If multiple keys: for all but ChannelPrivateError, can try with another
             # key
+            # ValueError corresponds to deactivated chats
             context.logger.warning(
                 f"Could not get channel metadata from channel {source_channel_id}"
             )
@@ -272,7 +273,7 @@ def handler(context, event):
             "keyword": data.get("keyword", None),
         }
 
-        chats = channel_full.chats
+        chats = [c for c in channel_full.chats if not getattr(c, "deactivated", False)]
         parent_channel = chats[0]
         for c in chats:
             # If channelFull has more than one chat, this condition should be met for a
