@@ -315,22 +315,12 @@ def handler(context, event):
             }
 
             # message counts
-            # DISABLED! this READS all messages!!
-            # context.logger.debug(
-            #     f"Collecting channel {channel_id} chat {chat.id} message counts"
-            # )
-            # counts = {
-            #     k: v
-            #     for k, v in [
-            #         [
-            #             f"{content_type}_count",
-            #             collegram.messages.get_channel_messages_count(
-            #                 client, chat, f
-            #             ),
-            #         ]
-            #         for content_type, f in collegram.messages.MESSAGE_CONTENT_TYPE_MAP.items()
-            #     ]
-            # }
+            context.logger.debug(
+                f"Collecting channel {source_channel_id} chat {chat.id} message counts"
+            )
+            for content_type, f in collegram.messages.MESSAGE_CONTENT_TYPE_MAP.items():
+                c = collegram.messages.get_channel_messages_count(client, chat, f)
+                channel_full_d[f"{content_type}_count"] = c
 
             row = base.copy() | query_info.copy() | channel_chat  # | counts
 
@@ -342,8 +332,8 @@ def handler(context, event):
                 f"Evaluate channel {source_channel_id} chat {chat.id} priority"
             )
             priority = collegram.channels.get_explo_priority(
-                channel_chat["language_code"],
-                1,  # counts.get("message_count", 0),
+                lang_code,
+                channel_full_d.get("message_count", 1),
                 chat.participants_count,
                 lifespan_seconds,
                 distance_from_core,
