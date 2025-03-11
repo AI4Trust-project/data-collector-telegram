@@ -302,7 +302,7 @@ def handler(context, event):
                 lang_code = collegram.text.detect_chan_lang(channel_full_d, lang_detector)
                 context.logger.debug(f"language {lang_code} for channel {source_channel_id}")
 
-            channel_chat = {
+            row = {
                 "id": chat.id,
                 "parent_channel_id": parent_channel.id,
                 "source_channel_id": source_channel_id,
@@ -310,7 +310,6 @@ def handler(context, event):
                 "username": chat_d["username"],
                 "nr_participants": chat_d["nr_participants"],
                 "distance_from_core": distance_from_core,
-                # TODO: wtf?
                 "language_code": lang_code,
             }
 
@@ -322,7 +321,7 @@ def handler(context, event):
                 c = collegram.messages.get_channel_messages_count(client, chat, f)
                 channel_full_d[f"{content_type}_count"] = c
 
-            row = base.copy() | query_info.copy() | channel_chat  # | counts
+            row = base.copy() | query_info.copy() | row
 
             # (re)evaluate collection priority
             lifespan_seconds = (
