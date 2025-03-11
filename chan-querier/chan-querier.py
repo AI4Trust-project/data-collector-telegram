@@ -303,9 +303,8 @@ def handler(context, event):
                 "username": chat_d["username"],
                 "nr_participants": chat_d["nr_participants"],
                 "distance_from_core": distance_from_core,
-                "language_code": (
-                    data.get("username") if lang_code is None else lang_code
-                ),
+                # TODO: wtf?
+                "language_code": (channel_username if lang_code is None else lang_code),
             }
 
             # message counts
