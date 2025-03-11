@@ -299,8 +299,12 @@ def handler(context, event):
 
             if chat.id == parent_channel.id:
                 # language detection on text
-                lang_code = collegram.text.detect_chan_lang(channel_full_d, lang_detector)
-                context.logger.debug(f"language {lang_code} for channel {source_channel_id}")
+                lang_code = collegram.text.detect_chan_lang(
+                    channel_full_d, lang_detector
+                )
+                context.logger.debug(
+                    f"language {lang_code} for channel {source_channel_id}"
+                )
 
             row = {
                 "id": chat.id,
