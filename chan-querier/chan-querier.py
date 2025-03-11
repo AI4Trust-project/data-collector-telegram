@@ -223,7 +223,6 @@ def handler(context, event):
         context.logger.info(
             f"Collecting channel metadata from channel {source_channel_id}"
         )
-
         try:
             channel_full = collegram.channels.get_full(
                 client,
@@ -258,8 +257,6 @@ def handler(context, event):
             raise e
 
         src_channel_full_d = json.loads(channel_full.to_json())
-
-        context.logger.debug(f"Detect language from channel {source_channel_id}")
 
         # keep track of search
         base = {
@@ -299,11 +296,12 @@ def handler(context, event):
 
             if chat.id == parent_channel.id:
                 # language detection on text
+                context.logger.debug(f"Detect language from channel {chat.id}")
                 lang_code = collegram.text.detect_chan_lang(
                     channel_full_d, lang_detector
                 )
                 context.logger.debug(
-                    f"language {lang_code} for channel {source_channel_id}"
+                    f"language {lang_code} for channel {chat.id}"
                 )
 
             row = {
