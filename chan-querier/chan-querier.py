@@ -155,6 +155,18 @@ def gen_query_info(query_time=None):
     }
 
 
+def gen_msg_key(row: dict):
+    return "+".join(
+        str(p)
+        for p in [
+            row.get("search_id"),
+            row["source_channel_id"],
+            row["id"],
+            row["query_id"],
+        ]
+    )
+
+
 def handle_recommended(
     context,
     recommended,
@@ -232,6 +244,76 @@ def handle_recommended(
         upsert(cur, "telegram.channels", ["id"], upsert_data)
 
 
+def get_full_metadata(
+    context,
+    channel_id,
+    access_hash,
+    channel_username,
+    source_channel_id,
+    base,
+    query_info,
+    channel=None,
+):
+    connection = context.connection
+    client = context.client
+    producer = context.producer
+    status = True
+    channel_full = None
+
+    with connection.cursor() as cur:
+        # Update the query info in case of error, so that we don't come back to this
+        # same channel on the next iteration.
+        upsert_channel(cur, {"id": channel_id, **query_info})
+    try:
+        channel_full = collegram.channels.get_full(
+            client,
+            channel=channel,
+            channel_username=channel_username,
+            channel_id=channel_id,
+            access_hash=access_hash,
+        )
+    except (
+        ChannelInvalidError,
+        ChannelPrivateError,
+        UsernameInvalidError,
+        ValueError,
+    ) as e:
+        status = e
+        # If multiple keys: for all but ChannelPrivateError, can try with another
+        # key
+        # ValueError corresponds to deactivated chats
+        context.logger.warning(
+            f"Could not get channel metadata from channel {channel_id}"
+        )
+        flat_channel_d = {
+            "id": channel_id,
+            "source_channel_id": source_channel_id,
+            "username": channel_username,
+            "is_private": True,
+            **base,
+            **query_info,
+        }
+        msg_key = gen_msg_key(flat_channel_d)
+        # Update the query info in case of error, so that we don't come back to this
+        # same channel on the next iteration.
+        if isinstance(e, ChannelPrivateError):
+            flat_channel_d["is_private"] = True
+            with connection.cursor() as cur:
+                upsert_channel(cur, flat_channel_d)
+            producer.send(
+                "telegram.channel_metadata", key=msg_key, value=flat_channel_d
+            )
+        else:
+            flat_channel_d["is_invalid"] = True
+            with connection.cursor() as cur:
+                upsert_channel(cur, flat_channel_d)
+            producer.send(
+                "telegram.channel_metadata", key=msg_key, value=flat_channel_d
+            )
+
+    return status, channel_full
+
+
 def single_chan_querier(
     context, requery_after: datetime.timedelta, lang_priorities: dict
 ):
@@ -246,7 +328,10 @@ def single_chan_querier(
         )
         dt_to_str = dt_to.isoformat()
         only_top_priority = "ORDER BY metadata_collection_priority ASC LIMIT 1;"
-        where = f"WHERE query_date IS NULL OR query_date < TIMESTAMP '{dt_to_str}'"
+        where = (
+            "WHERE (NOT is_private) AND (NOT is_invalid)"
+            f" AND (query_date IS NULL OR query_date < TIMESTAMP '{dt_to_str}')"
+        )
         cols = "id, access_hash, username, parent_channel_id, distance_from_core, search_id, keyword_id, keyword"
         with connection.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
@@ -264,56 +349,30 @@ def single_chan_querier(
         # distance from search core, as in number of hops
         distance_from_core = data.get("distance_from_core", 0)
 
-        # collect full info for channel
-        src_query_info = gen_query_info()
-        context.logger.info(
-            f"Collecting channel metadata from channel {source_channel_id}"
-        )
-
-        with connection.cursor() as cur:
-            # Update the query info in case of error, so that we don't come back to this
-            # same channel on the next iteration.
-            upsert_channel(cur, {"id": source_channel_id, **src_query_info})
-        try:
-            channel_full = collegram.channels.get_full(
-                client,
-                channel_username=channel_username,
-                channel_id=source_channel_id,
-                access_hash=access_hash,
-            )
-        except (
-            ChannelInvalidError,
-            ChannelPrivateError,
-            UsernameInvalidError,
-            ValueError,
-        ) as e:
-            # If multiple keys: for all but ChannelPrivateError, can try with another
-            # key
-            # ValueError corresponds to deactivated chats
-            context.logger.warning(
-                f"Could not get channel metadata from channel {source_channel_id}"
-            )
-            if isinstance(e, ChannelPrivateError):
-                flat_channel_d = {
-                    "id": source_channel_id,
-                    "username": channel_username,
-                    "is_private": True,
-                    **src_query_info,
-                }
-                # send channel metadata to iceberg TODO
-                # producer.send(
-                #     "telegram.channel_metadata", value=iceberg_json_dumps(flat_channel_d)
-                # )
-            return e
-
-        src_channel_full_d = json.loads(channel_full.to_json())
-
         # keep track of search
         base = {
             "search_id": data.get("search_id", None),
             "keyword_id": data.get("keyword_id", None),
             "keyword": data.get("keyword", None),
         }
+
+        # collect full info for channel
+        src_query_info = gen_query_info()
+        context.logger.info(
+            f"Collecting channel metadata from channel {source_channel_id}"
+        )
+        status, channel_full = get_full_metadata(
+            context,
+            source_channel_id,
+            access_hash,
+            channel_username,
+            source_channel_id,
+            base,
+            src_query_info,
+        )
+        if status is not True:
+            return status
+        src_channel_full_d = json.loads(channel_full.to_json())
 
         chats = [c for c in channel_full.chats if not getattr(c, "deactivated", False)]
         parent_channel = chats[0]
@@ -357,10 +416,18 @@ def single_chan_querier(
             # Query only if necessary.
             if chat.id != source_channel_id:
                 query_info = gen_query_info()
-                channel_full = collegram.channels.get_full(
-                    client,
+                status, channel_full = get_full_metadata(
+                    context,
+                    chat.id,
+                    chat.access_hash,
+                    chat.username,
+                    source_channel_id,
+                    base,
+                    src_query_info,
                     channel=chat,
                 )
+                if status is not True:
+                    return status
                 channel_full_d = json.loads(channel_full.to_json())
             else:
                 query_info = src_query_info
@@ -451,16 +518,8 @@ def single_chan_querier(
 
             # send raw channel metadata to iceberg
             # TODO: put recommended channels in there or rely on RELS_TABLE?
-            channel_full_d.update(query_info)
-            msg_key = "+".join(
-                str(p)
-                for p in [
-                    base.get("search_id"),
-                    source_channel_id,
-                    chat.id,
-                    query_info["query_id"],
-                ]
-            )
+            channel_full_d = {**channel_full_d, **query_info, **base}
+            msg_key = gen_msg_key(row)
             producer.send(
                 "telegram.raw_channel_metadata", key=msg_key, value=channel_full_d
             )

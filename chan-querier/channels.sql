@@ -5,6 +5,8 @@ CREATE TABLE
         username VARCHAR(255),
         source_channel_id BIGINT,
         parent_channel_id BIGINT,
+        is_private BOOLEAN DEFAULT FALSE,
+        is_invalid BOOLEAN DEFAULT FALSE,
         channel_last_queried_at TIMESTAMP WITH TIME ZONE,
         messages_last_queried_at TIMESTAMP WITH TIME ZONE,
         last_queried_message_id INT DEFAULT 0,
