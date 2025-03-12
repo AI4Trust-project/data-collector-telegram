@@ -170,7 +170,6 @@ def handler(context, event):
                         chan_row = {
                             "id": channel.id,
                             "access_hash": channel.access_hash,
-                            "title": channel.title,
                             "username": channel.username,
                             **base,
                         }
