@@ -269,6 +269,11 @@ def single_chan_querier(
         context.logger.info(
             f"Collecting channel metadata from channel {source_channel_id}"
         )
+
+        with connection.cursor() as cur:
+            # Update the query info in case of error, so that we don't come back to this
+            # same channel on the next iteration.
+            upsert_channel(cur, {"id": source_channel_id, **src_query_info})
         try:
             channel_full = collegram.channels.get_full(
                 client,
