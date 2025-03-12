@@ -191,7 +191,7 @@ def handle_recommended(context, recommended, recommending_row, base):
                 cur,
                 "telegram.channels",
                 ["parent_channel_id", "distance_from_core"],
-                {"id": recommended.i},
+                {"id": recommended.id},
             )
         if rec_data is None:
             rec_parent_id = recommended.id
