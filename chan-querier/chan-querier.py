@@ -295,7 +295,6 @@ def handler(context, event):
                 flat_channel_d = {
                     "id": source_channel_id,
                     "username": channel_username,
-                    "last_queried_at": src_query_info["query_time"],
                     "is_private": True,
                     **src_query_info,
                 }
