@@ -7,6 +7,7 @@ import uuid
 import collegram
 import nest_asyncio
 import psycopg
+import psycopg.rows
 from kafka import KafkaProducer
 from lingua import LanguageDetectorBuilder
 from telethon import TelegramClient
@@ -134,10 +135,10 @@ def upsert(cur, table, pk_fields, kwargs):
         return True
 
 
-def upsert_recommended(cur, source, dest, query_time):
+def upsert_recommended(cur, source, source_parent, dest, dest_parent, query_time):
     cur.execute(
-        f"INSERT INTO {RELS_TABLE} (source, destination,relation, first_discovered, last_discovered) "
-        f" VALUES({source},{dest},'recommended',%s,%s) "
+        f"INSERT INTO {RELS_TABLE} (source, source_parent, destination, destination_parent, relation, first_discovered, last_discovered) "
+        f" VALUES({source}, {source_parent}, {dest}, {dest_parent},'recommended',%s,%s) "
         " ON CONFLICT(source, destination) "
         f" DO UPDATE SET last_discovered=%s",
         [query_time, query_time, query_time],
@@ -158,6 +159,85 @@ def gen_query_info(query_time=None):
     }
 
 
+def handle_recommended(context, recommended, recommending_row, base):
+    source_chat_id = recommending_row["id"]
+    source_channel_id = recommending_row["source_channel_id"]
+    source_parent = recommending_row["parent_channel_id"]
+    distance_from_core = recommending_row["distance_from_core"]
+    rec_log = f"{source_channel_id} chat {source_chat_id} recommended {recommended.id}"
+    context.logger.debug(f"Process channel {rec_log}")
+    connection = context.connection
+
+    with connection.cursor() as cur:
+        rec_rel_data = get(
+            cur,
+            RELS_TABLE,
+            [
+                "source",
+                "destination",
+                "last_discovered",
+            ],
+            {
+                "source": source_chat_id,
+                "destination": recommended.id,
+                "relation": "recommended",
+            },
+        )
+
+    if rec_rel_data is None:
+        context.logger.debug(f"Record channel {rec_log}")
+
+        with connection.cursor() as cur:
+            rec_data = get(
+                cur,
+                "telegram.channels",
+                ["parent_channel_id", "distance_from_core"],
+                {"id": recommended.i},
+            )
+        if rec_data is None:
+            rec_parent_id = recommended.id
+            rec_dist_from_core = distance_from_core
+        else:
+            rec_parent_id = rec_data["parent_channel_id"] or recommended.id
+            rec_dist_from_core = min(
+                distance_from_core + 1, rec_data["distance_from_core"]
+            )
+
+        # split recommended into table to obtain an adjacency matrix
+        with connection.cursor() as cur:
+            upsert_recommended(
+                cur,
+                source_chat_id,
+                source_parent,
+                recommended.id,
+                rec_parent_id,
+                recommending_row["query_time"],
+            )
+
+        with connection.cursor() as cur:
+            rec_fwds, rec_links, rec_recs = [
+                count(
+                    cur,
+                    RELS_TABLE,
+                    {"destination_parent": rec_parent_id, "relation": rel},
+                )
+                for rel in ("forwarded", "linked", "recommended")
+            ]
+        rec_priority = collegram.channels.get_centrality_score(
+            rec_dist_from_core, rec_fwds, rec_recs, rec_links
+        )
+        upsert_data = {
+            "id": recommended.id,
+            "access_hash": recommended.access_hash,
+            "username": recommended.username,
+            "distance_from_core": rec_dist_from_core,
+            # TODO: set in messages querier too
+            "metadata_collection_priority": rec_priority,
+            **base,
+        }
+        upsert(cur, "telegram.channels", ["id"], upsert_data)
+
+
 def handler(context, event):
     # Triggered by chans_to_query
     nest_asyncio.apply()
@@ -174,49 +254,25 @@ def handler(context, event):
     lang_detector = context.lang_detector
 
     try:
-        # messages come from keyword search and peer/link discovery
-        # NOTE: we need to avoid looping between peers!
-        data = json.loads(event.body.decode("utf-8"))
+        dt_to = datetime.datetime.now().astimezone(
+            datetime.timezone.utc
+        ) - datetime.timedelta(days=10)
+        dt_to_str = dt_to.isoformat()
+        only_top_priority = "ORDER BY metadata_collection_priority ASC LIMIT 1;"
+        where = f"WHERE query_date IS NULL OR query_date < TIMESTAMP '{dt_to_str}'"
+        cols = "id, access_hash, username, parent_channel_id, distance_from_core, search_id, keyword_id, keyword"
+        with connection.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                f"SELECT {cols} FROM telegram.channels {where} {only_top_priority}"
+            )
+            data = cur.fetchone()
 
         source_channel_id = data.get("id")
         parent_channel_id = data.get("parent_channel_id")
         access_hash = data.get("access_hash")
         channel_username = data.get("username")
-        context.logger.debug(f"Receive channel data for channel {source_channel_id}")
-
-        # read from db to merge with prev values
-        with connection.cursor() as cur:
-            x = get(
-                cur,
-                "telegram.channels",
-                [
-                    "id",
-                    "access_hash",
-                    "search_id",
-                    "distance_from_core",
-                    "nr_participants",
-                ],
-                {"id": source_channel_id},
-            )
-
-            # count incoming relations to evaluate priority
-            nr_forwarding_channels, nr_linking_channels, nr_recommending_channels = [
-                count(
-                    cur,
-                    RELS_TABLE,
-                    {"destination_parent": parent_channel_id, "relation": rel},
-                )
-                for rel in ("forwarded", "linked", "recommended")
-            ]
-
         # distance from search core, as in number of hops
-        distance_from_core = (
-            min(x.get("distance_from_core", 0), data.get("distance_from_core", 0))
-            if x
-            else data.get("distance_from_core", 0)
-        )
-
-        # LOOP avoidance: if already collected for the same search and fresh, skip
+        distance_from_core = data.get("distance_from_core", 0)
 
         # collect full info for channel
         src_query_info = gen_query_info()
@@ -273,6 +329,30 @@ def handler(context, event):
             # consider this discussion chat to be its own parent.
             if c.broadcast:
                 parent_channel = c
+
+        if parent_channel_id is None:
+            parent_channel_id = parent_channel.id
+            for c in chats:
+                # update destination parent in rels
+                with connection.cursor() as cur:
+                    cur.execute(
+                        f"UPDATE {RELS_TABLE}"
+                        f" SET destination_parent = {parent_channel.id}"
+                        f" WHERE destination = {c.id}",
+                    )
+
+        context.logger.debug(f"Receive relational channel data for channel {source_channel_id}")
+        with connection.cursor() as cur:
+            # count incoming relations to evaluate priority
+            nr_forwarding_channels, nr_linking_channels, nr_recommending_channels = [
+                count(
+                    cur,
+                    RELS_TABLE,
+                    {"destination_parent": parent_channel.id, "relation": rel},
+                )
+                for rel in ("forwarded", "linked", "recommended")
+            ]
+
         # Place parent channel first to attribute its language to its children.
         chats = [parent_channel] + [c for c in chats if c.id != parent_channel.id]
 
@@ -360,64 +440,16 @@ def handler(context, event):
             recommended_chans = collegram.channels.get_recommended(client, chat)
             # forward recommended to querier
             for recommended in recommended_chans:
-                context.logger.debug(
-                    f"Process channel {source_channel_id} chat {chat.id} recommended {recommended.id}"
-                )
-
-                # check if exists and fresh to avoid loops between peers
-                with connection.cursor() as cur:
-                    z = get(
-                        cur,
-                        RELS_TABLE,
-                        ["source", "destination", "last_discovered"],
-                        {
-                            "source_parent": parent_channel.id,
-                            "destination": recommended.id,
-                            "relation": "recommended",
-                        },
-                    )
-
-                if (
-                    not z
-                    or (query_time - z["last_discovered"]).total_seconds()
-                    > WAIT_INTERVAL
-                ):
-                    context.logger.debug(
-                        f"Record channel {source_channel_id} chat {chat.id} recommended {recommended.id}"
-                    )
-
-                    # split recommended into table to obtain an adjacency matrix
-                    with connection.cursor() as cur:
-                        upsert_recommended(
-                            cur,
-                            chat.id,
-                            recommended.id,
-                            query_time,
-                        )
-                    #  send to querier
-                    message = base.copy() | {
-                        "id": recommended.id,
-                        "access_hash": recommended.access_hash,
-                        "username": recommended.username,
-                        "nr_participants": recommended.participants_count,
-                        "distance_from_core": distance_from_core + 1,
-                    }
-
-                    # NOTE: this breaks on loops: if we get the same channel from the same search
-                    # via another source the messages will collide
-                    # TODO handle, for now we let it break to avoid duplicates
-                    msg_key = message["search_id"] + "|" + str(message["id"])
-
-                    producer.send(
-                        "telegram.channels_to_query",
-                        key=msg_key,
-                        value=json.loads(json.dumps(message)),
-                    )
+                handle_recommended(context, recommended, row, base)
 
         # done.
         context.logger.info(
             f"Channel {source_channel_id} info collected, {len(chats)} chats"
         )
+
+        # Send a message to call this querier again.
+        m = json.loads(json.dumps({"status": "chan_metadata_collection_done"}))
+        producer.send("telegram.channels_to_query", m)
 
         return context.Response(
             body=f"Channel {source_channel_id} info collected",

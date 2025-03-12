@@ -58,7 +58,6 @@ def get_keywords(conn, kid):
     data = []
 
     try:
-
         cur = conn.cursor()
 
         query = "SELECT keyword_id, keyword, lang, data_owner, topic FROM telegram.search_keywords ORDER BY keyword_id"
@@ -87,8 +86,23 @@ def get_keywords(conn, kid):
     return data
 
 
-def handler(context, event):
+def insert_if_missing(cur, table, pk_fields, kwargs):
+    # check to see if it already exists
+    where = " AND ".join("%s=%%s" % pkf for pkf in pk_fields)
+    where_args = [kwargs[pkf] for pkf in pk_fields]
+    cur.execute("SELECT COUNT(*) FROM %s WHERE %s LIMIT 1" % (table, where), where_args)
+    fields = [f for f in kwargs.keys()]
+    if cur.fetchone()[0] > 0:
+        return False
+    else:
+        field_placeholders = ["%s"] * len(fields)
+        fmt_args = (table, ",".join(fields), ",".join(field_placeholders))
+        insert_args = [kwargs[f] for f in fields]
+        cur.execute("INSERT INTO %s (%s) VALUES (%s)" % fmt_args, insert_args)
+        return True
 
+
+def handler(context, event):
     # add nest asyncio for waiting calls
     nest_asyncio.apply()
 
@@ -104,10 +118,7 @@ def handler(context, event):
             kid = int(parameters["keyword_id"])
 
     with psycopg.connect(
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        dbname=DB_NAME,
+        user=DB_USER, password=DB_PASSWORD, host=DB_HOST, dbname=DB_NAME
     ) as connection:
         keywords_data = get_keywords(connection, kid)
 
@@ -118,55 +129,52 @@ def handler(context, event):
             date = datetime.datetime.now().astimezone(timezone.utc)
             query_uuid = str(uuid.uuid4())
             kw = keyword.get("keyword", None)
+            lang_code = LANGUAGE_CODES[keyword["lang"].lower()]
             channels = client.loop.run_until_complete(
                 client(SearchRequest(q=kw, limit=100))
             ).chats
 
             # log search
-            row = {
+            search_row = {
                 "id": query_uuid,
                 "data_owner": keyword.get("data_owner", TELEGRAM_OWNER),
                 "created_at": date.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "keyword_id": keyword.get("keyword_id", None),
                 "keyword": kw,
                 "topic": keyword.get("topic", ""),
-                "language_code": LANGUAGE_CODES[keyword["lang"].lower()],
+                "language_code": lang_code,
                 "results": len(channels),
             }
 
             producer.send(
                 "telegram.search_parameters",
-                key=row["id"],
-                value=json.loads(json.dumps(row)),
+                key=search_row["id"],
+                value=json.loads(json.dumps(search_row)),
             )
 
             # track channels discovered from search
             base = {
-                "language_code": LANGUAGE_CODES[keyword["lang"].lower()],
-                "created_at": date.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "data_owner": keyword.get("data_owner", TELEGRAM_OWNER),
+                "language_code": lang_code,
                 "search_id": query_uuid,
                 "keyword_id": keyword.get("keyword_id", None),
                 "keyword": keyword.get("keyword", None),
+                "distance_from_core": 0,
             }
 
-            for channel in channels:
-                message = base.copy() | {
-                    "id": channel.id,
-                    "access_hash": channel.access_hash,
-                    "title": channel.title,
-                    "username": channel.username,
-                    "nr_participants": channel.participants_count,
-                    "distance_from_core": 0,
-                }
-
-                msg_key = message["search_id"] + "|" + str(message["id"])
-
-                producer.send(
-                    "telegram.channels_to_query",
-                    key=msg_key,
-                    value=json.loads(json.dumps(message)),
-                )
+            with psycopg.connect(
+                user=DB_USER, password=DB_PASSWORD, host=DB_HOST, dbname=DB_NAME
+            ) as connection:
+                connection.autocommit = True
+                with connection.cursor() as cur:
+                    for channel in channels:
+                        chan_row = {
+                            "id": channel.id,
+                            "access_hash": channel.access_hash,
+                            "title": channel.title,
+                            "username": channel.username,
+                            **base,
+                        }
+                        insert_if_missing(cur, "telegram.channels", ["id"], chan_row)
 
             # wait to stagger requests
             time.sleep(DELAY)

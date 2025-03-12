@@ -1,10 +1,10 @@
 CREATE TABLE
     IF NOT EXISTS telegram.channels (
         id BIGINT NOT NULL,
-        source_channel_id BIGINT NOT NULL,
-        parent_channel_id BIGINT NOT NULL,
         access_hash BIGINT NOT NULL,
         username VARCHAR(255),
+        source_channel_id BIGINT,
+        parent_channel_id BIGINT,
         channel_last_queried_at TIMESTAMP WITH TIME ZONE,
         messages_last_queried_at TIMESTAMP WITH TIME ZONE,
         last_queried_message_id INT DEFAULT 0,
@@ -14,6 +14,7 @@ CREATE TABLE
         distance_from_core INT DEFAULT 0,
         message_count INT DEFAULT 0,
         collection_priority NUMERIC(10, 9)
+        metadata_collection_priority NUMERIC(10, 9)
         -- search info
         search_id VARCHAR(255),
         keyword_id VARCHAR(255),
