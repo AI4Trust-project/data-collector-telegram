@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+import time
 import uuid
 
 import collegram
@@ -231,25 +232,18 @@ def handle_recommended(
         upsert(cur, "telegram.channels", ["id"], upsert_data)
 
 
-def handler(context, event):
-    # Triggered by chans_to_query
-    nest_asyncio.apply()
-    # Set relative priority for project's languages. Since the language detection is
-    # surely not 100% reliable, have to allow for popular channels not detected as using
-    # these to be collectable.
-    lang_priorities = {
-        lc: 1e-3 for lc in ["EN", "FR", "ES", "DE", "EL", "IT", "PL", "RO"]
-    }
-
+def single_chan_querier(
+    context, requery_after: datetime.timedelta, lang_priorities: dict
+):
     producer = context.producer
     client = context.client
     connection = context.connection
     lang_detector = context.lang_detector
 
     try:
-        dt_to = datetime.datetime.now().astimezone(
-            datetime.timezone.utc
-        ) - datetime.timedelta(days=10)
+        dt_to = (
+            datetime.datetime.now().astimezone(datetime.timezone.utc) - requery_after
+        )
         dt_to_str = dt_to.isoformat()
         only_top_priority = "ORDER BY metadata_collection_priority ASC LIMIT 1;"
         where = f"WHERE query_date IS NULL OR query_date < TIMESTAMP '{dt_to_str}'"
@@ -259,6 +253,9 @@ def handler(context, event):
                 f"SELECT {cols} FROM telegram.channels {where} {only_top_priority}"
             )
             data = cur.fetchone()
+
+        if data is None:
+            return False
 
         source_channel_id = data.get("id")
         parent_channel_id = data.get("parent_channel_id")
@@ -302,7 +299,7 @@ def handler(context, event):
                 # producer.send(
                 #     "telegram.channel_metadata", value=iceberg_json_dumps(flat_channel_d)
                 # )
-            raise e
+            return e
 
         src_channel_full_d = json.loads(channel_full.to_json())
 
@@ -458,20 +455,29 @@ def handler(context, event):
         context.logger.info(
             f"Channel {source_channel_id} info collected, {len(chats)} chats"
         )
-
-        # Send a message to call this querier again.
-        m = json.loads(json.dumps({"status": "chan_metadata_collection_done"}))
-        producer.send("telegram.channels_to_query", m)
-
-        return context.Response(
-            body=f"Channel {source_channel_id} info collected",
-            headers={},
-            content_type="text/plain",
-            status_code=200,
-        )
+        return True
 
     except Exception as e:
         context.logger.warning(
             f"Could not get channel metadata from channel {source_channel_id}"
         )
-        raise e
+        return e
+
+
+def handler(context, event):
+    # Triggered by chans_to_query
+    nest_asyncio.apply()
+    # Set relative priority for project's languages. Since the language detection is
+    # surely not 100% reliable, have to allow for popular channels not detected as using
+    # these to be collectable.
+    lang_priorities = {
+        lc: 1e-3 for lc in ["EN", "FR", "ES", "DE", "EL", "IT", "PL", "RO"]
+    }
+    requery_after = datetime.timedelta(days=10)
+
+    while True:
+        result = single_chan_querier(context, requery_after, lang_priorities)
+        if isinstance(result, Exception):
+            context.logger.warning(repr(result))
+        elif not result:
+            time.sleep(10)
