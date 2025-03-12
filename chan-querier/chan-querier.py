@@ -445,11 +445,24 @@ def single_chan_querier(
             # send raw channel metadata to iceberg
             # TODO: put recommended channels in there or rely on RELS_TABLE?
             channel_full_d.update(query_info)
-            producer.send("telegram.raw_channel_metadata", value=channel_full_d)
+            msg_key = "+".join(
+                str(p)
+                for p in [
+                    base.get("search_id"),
+                    source_channel_id,
+                    chat.id,
+                    query_info["query_id"],
+                ]
+            )
+            producer.send(
+                "telegram.raw_channel_metadata", key=msg_key, value=channel_full_d
+            )
 
             flat_channel_d = collegram.channels.flatten_dict(channel_full_d)
             # send channel metadata to iceberg
-            producer.send("telegram.channel_metadata", value=flat_channel_d)
+            producer.send(
+                "telegram.channel_metadata", key=msg_key, value=flat_channel_d
+            )
 
         # done.
         context.logger.info(
