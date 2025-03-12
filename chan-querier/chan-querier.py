@@ -158,32 +158,32 @@ def gen_query_info(query_time=None):
     }
 
 
-def handle_recommended(context, recommended, recommending_row, base):
-    source_chat_id = recommending_row["id"]
-    source_channel_id = recommending_row["source_channel_id"]
-    source_parent = recommending_row["parent_channel_id"]
-    distance_from_core = recommending_row["distance_from_core"]
-    rec_log = f"{source_channel_id} chat {source_chat_id} recommended {recommended.id}"
+def handle_recommended(
+    context,
+    recommended,
+    src_chat_id,
+    src_source_channel_id,
+    src_parent_id,
+    src_distance_from_core,
+    query_info,
+    base,
+):
+    rec_log = f"{src_source_channel_id} chat {src_chat_id} recommended {recommended.id}"
     context.logger.debug(f"Process channel {rec_log}")
     connection = context.connection
 
     with connection.cursor() as cur:
-        rec_rel_data = get(
+        existing_count = count(
             cur,
             RELS_TABLE,
-            [
-                "source",
-                "destination",
-                "last_discovered",
-            ],
             {
-                "source": source_chat_id,
+                "source": src_chat_id,
                 "destination": recommended.id,
                 "relation": "recommended",
             },
         )
 
-    if rec_rel_data is None:
+    if existing_count == 0:
         context.logger.debug(f"Record channel {rec_log}")
 
         with connection.cursor() as cur:
@@ -193,24 +193,22 @@ def handle_recommended(context, recommended, recommending_row, base):
                 ["parent_channel_id", "distance_from_core"],
                 {"id": recommended.id},
             )
+        rec_dist_from_core = src_distance_from_core + 1
         if rec_data is None:
             rec_parent_id = recommended.id
-            rec_dist_from_core = distance_from_core
         else:
             rec_parent_id = rec_data["parent_channel_id"] or recommended.id
-            rec_dist_from_core = min(
-                distance_from_core + 1, rec_data["distance_from_core"]
-            )
+            rec_dist_from_core = min(rec_dist_from_core, rec_data["distance_from_core"])
 
         # split recommended into table to obtain an adjacency matrix
         with connection.cursor() as cur:
             upsert_recommended(
                 cur,
-                source_chat_id,
-                source_parent,
+                src_chat_id,
+                src_parent_id,
                 recommended.id,
                 rec_parent_id,
-                recommending_row["query_time"],
+                query_info["query_time"],
             )
 
         with connection.cursor() as cur:
@@ -439,7 +437,17 @@ def handler(context, event):
             recommended_chans = collegram.channels.get_recommended(client, chat)
             # forward recommended to querier
             for recommended in recommended_chans:
-                handle_recommended(context, recommended, row, base)
+                handle_recommended(
+                    context,
+                    recommended,
+                    chat.id,
+                    source_channel_id,
+                    parent_channel_id,
+                    distance_from_core,
+                    query_info,
+                    base,
+                )
+
 
         # done.
         context.logger.info(
