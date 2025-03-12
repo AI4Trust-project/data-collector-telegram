@@ -79,10 +79,6 @@ def _iceberg_json_default(value):
         return repr(value)
 
 
-# def iceberg_json_dumps(d: dict):
-#     return json.dumps(d, default=_iceberg_json_default).encode("utf-8")
-
-
 def get(cur, table, keys, kwargs):
     fields = [f for f in keys]
     where = " AND ".join("%s=%%s" % pkf for pkf in kwargs)
@@ -338,7 +334,9 @@ def handler(context, event):
                         f" WHERE destination = {c.id}",
                     )
 
-        context.logger.debug(f"Receive relational channel data for channel {source_channel_id}")
+        context.logger.debug(
+            f"Receive relational channel data for channel {source_channel_id}"
+        )
         with connection.cursor() as cur:
             # count incoming relations to evaluate priority
             nr_forwarding_channels, nr_linking_channels, nr_recommending_channels = [
@@ -369,7 +367,9 @@ def handler(context, event):
 
             query_time = query_info["query_time"]
             channel_full_d.pop("users", None)
-            chat_d = collegram.channels.flatten_dict(channel_full_d)
+            # Get count from full_chat and not from chat directly: latter is always
+            # null.
+            participants_count = channel_full_d["full_chat"]["participants_count"]
 
             if chat.id == parent_channel.id:
                 # language detection on text
@@ -377,20 +377,7 @@ def handler(context, event):
                 lang_code = collegram.text.detect_chan_lang(
                     channel_full_d, lang_detector
                 )
-                context.logger.debug(
-                    f"language {lang_code} for channel {chat.id}"
-                )
-
-            row = {
-                "id": chat.id,
-                "parent_channel_id": parent_channel.id,
-                "source_channel_id": source_channel_id,
-                "access_hash": chat_d["access_hash"],
-                "username": chat_d["username"],
-                "nr_participants": chat_d["nr_participants"],
-                "distance_from_core": distance_from_core,
-                "language_code": lang_code,
-            }
+                context.logger.debug(f"language {lang_code} for channel {chat.id}")
 
             # message counts
             context.logger.debug(
@@ -399,8 +386,6 @@ def handler(context, event):
             for content_type, f in collegram.messages.MESSAGE_CONTENT_TYPE_MAP.items():
                 c = collegram.messages.get_channel_messages_count(client, chat, f)
                 channel_full_d[f"{content_type}_count"] = c
-
-            row = base.copy() | query_info.copy() | row
 
             # (re)evaluate collection priority
             lifespan_seconds = (
@@ -412,7 +397,7 @@ def handler(context, event):
             priority = collegram.channels.get_explo_priority(
                 lang_code,
                 channel_full_d.get("message_count", 1),
-                chat.participants_count,
+                participants_count,
                 lifespan_seconds,
                 distance_from_core,
                 nr_forwarding_channels,
@@ -421,9 +406,22 @@ def handler(context, event):
                 lang_priorities,
                 acty_slope=5,
             )
-            row["collection_priority"] = priority
 
             # write channel info to postgres
+            row = {
+                "id": chat.id,
+                "access_hash": chat.access_hash,
+                "username": chat.username,
+                "parent_channel_id": parent_channel.id,
+                "source_channel_id": source_channel_id,
+                "language_code": lang_code,
+                "nr_participants": participants_count,
+                "distance_from_core": distance_from_core,
+                "message_count": channel_full_d.get("message_count", 1),
+                "collection_priority": priority,
+                **base,
+                **query_info,
+            }
             context.logger.debug(
                 f"row: {json.dumps(row, default=_iceberg_json_default)}"
             )
@@ -448,6 +446,14 @@ def handler(context, event):
                     base,
                 )
 
+            # send raw channel metadata to iceberg
+            # TODO: put recommended channels in there or rely on RELS_TABLE?
+            channel_full_d.update(query_info)
+            producer.send("telegram.raw_channel_metadata", value=channel_full_d)
+
+            flat_channel_d = collegram.channels.flatten_dict(channel_full_d)
+            # send channel metadata to iceberg
+            producer.send("telegram.channel_metadata", value=flat_channel_d)
 
         # done.
         context.logger.info(
