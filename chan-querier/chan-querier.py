@@ -368,6 +368,8 @@ def single_chan_querier(
 
             query_time = query_info["query_time"]
             channel_full_d.pop("users", None)
+            channel_full_d["source_channel_id"] = source_channel_id
+            channel_full_d["parent_channel_id"] = parent_channel_id
             # Get count from full_chat and not from chat directly: latter is always
             # null.
             participants_count = channel_full_d["full_chat"]["participants_count"]
