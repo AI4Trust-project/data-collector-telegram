@@ -1,5 +1,4 @@
 import datetime
-import gc
 import json
 import os
 import uuid
@@ -463,6 +462,3 @@ def handler(context, event):
             f"Could not get channel metadata from channel {source_channel_id}"
         )
         raise e
-
-    # force garbage collection
-    gc.collect()
