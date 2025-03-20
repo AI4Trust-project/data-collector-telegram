@@ -15,8 +15,8 @@ CREATE TABLE
         nr_participants INT DEFAULT 0,
         distance_from_core INT DEFAULT 0,
         message_count INT DEFAULT 0,
-        collection_priority NUMERIC(10, 9)
-        metadata_collection_priority NUMERIC(10, 9)
+        collection_priority NUMERIC(10, 9),
+        metadata_collection_priority NUMERIC(10, 9),
         -- search info
         search_id VARCHAR(255),
         keyword_id VARCHAR(255),
@@ -24,7 +24,7 @@ CREATE TABLE
         -- query info
         data_owner VARCHAR(255),
         query_id VARCHAR(255),
-        query_date TIMESTAMP,
+        query_date TIMESTAMP
     );
 
 CREATE INDEX telegram_channels_id_index ON telegram.channels (id);

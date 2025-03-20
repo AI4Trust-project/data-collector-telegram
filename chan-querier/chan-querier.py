@@ -25,7 +25,8 @@ DB_HOST = os.environ.get("DATABASE_HOST")
 TELEGRAM_OWNER = os.environ["TELEGRAM_OWNER"]
 
 RELS_TABLE = "telegram.channels_rels"
-WAIT_INTERVAL = 60 * 60 * 24  # 24 hours
+WAIT_INTERVAL = 60
+DELAY = 10
 
 
 async def init_context(context):
@@ -150,7 +151,7 @@ def gen_query_info(query_time=None):
         query_time = datetime.datetime.now().astimezone(datetime.timezone.utc)
     return {
         "query_id": str(uuid.uuid4()),
-        "query_date": query_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "query_date": query_time,
         "data_owner": TELEGRAM_OWNER,
     }
 
@@ -217,7 +218,7 @@ def handle_recommended(
                 src_parent_id,
                 recommended.id,
                 rec_parent_id,
-                query_info["query_time"],
+                query_info["query_date"],
             )
 
         with connection.cursor() as cur:
@@ -229,6 +230,7 @@ def handle_recommended(
                 )
                 for rel in ("forwarded", "linked", "recommended")
             ]
+        
         rec_priority = collegram.channels.get_centrality_score(
             rec_dist_from_core, rec_fwds, rec_recs, rec_links
         )
@@ -241,7 +243,9 @@ def handle_recommended(
             "metadata_collection_priority": rec_priority,
             **base,
         }
-        upsert(cur, "telegram.channels", ["id"], upsert_data)
+
+        with connection.cursor() as cur:
+            upsert(cur, "telegram.channels", ["id"], upsert_data)
 
 
 def get_full_metadata(
@@ -264,6 +268,7 @@ def get_full_metadata(
         # Update the query info in case of error, so that we don't come back to this
         # same channel on the next iteration.
         upsert_channel(cur, {"id": channel_id, **query_info})
+    
     try:
         channel_full = collegram.channels.get_full(
             client,
@@ -433,7 +438,7 @@ def single_chan_querier(
                 query_info = src_query_info
                 channel_full_d = src_channel_full_d
 
-            query_time = query_info["query_time"]
+            query_time = query_info["query_date"]
             channel_full_d.pop("users", None)
             channel_full_d["source_channel_id"] = source_channel_id
             channel_full_d["parent_channel_id"] = parent_channel_id
@@ -492,9 +497,9 @@ def single_chan_querier(
                 **base,
                 **query_info,
             }
-            context.logger.debug(
-                f"row: {json.dumps(row, default=_iceberg_json_default)}"
-            )
+            # context.logger.debug(
+            #     f"row: {json.dumps(row, default=_iceberg_json_default)}"
+            # )
             with connection.cursor() as cur:
                 upsert_channel(cur, row)
 
@@ -537,7 +542,7 @@ def single_chan_querier(
         return True
 
     except Exception as e:
-        context.logger.warning(
+        context.logger.error(
             f"Could not get channel metadata from channel {source_channel_id}"
         )
         return e
@@ -554,9 +559,19 @@ def handler(context, event):
     }
     requery_after = datetime.timedelta(days=10)
 
+    context.logger.info("Start loop on channels to query")
+
     while True:
         result = single_chan_querier(context, requery_after, lang_priorities)
         if isinstance(result, Exception):
-            context.logger.warning(repr(result))
-        elif not result:
-            time.sleep(10)
+            context.logger.error(repr(result))
+            # wait on error
+            time.sleep(DELAY)
+        elif result is False:
+            # wait on no data
+            time.sleep(WAIT_INTERVAL)
+        else:
+            # min wait to stagger requests
+            time.sleep(0.05)
+
+    return "Stopped"
