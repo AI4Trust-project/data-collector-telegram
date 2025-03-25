@@ -67,13 +67,6 @@ async def init_context(context):
     setattr(context, "lang_detector", lang_detector)
 
 
-# def _json_default(value):
-#     if isinstance(value, datetime):
-#         return value.isoformat()
-#     else:
-#         return repr(value)
-
-
 def _iceberg_json_default(value):
     if isinstance(value, datetime.datetime):
         return value.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -230,7 +223,7 @@ def handle_recommended(
                 )
                 for rel in ("forwarded", "linked", "recommended")
             ]
-        
+
         rec_priority = collegram.channels.get_centrality_score(
             rec_dist_from_core, rec_fwds, rec_recs, rec_links
         )
@@ -239,7 +232,6 @@ def handle_recommended(
             "access_hash": recommended.access_hash,
             "username": recommended.username,
             "distance_from_core": rec_dist_from_core,
-            # TODO: set in messages querier too
             "metadata_collection_priority": rec_priority,
             **base,
         }
@@ -268,7 +260,7 @@ def get_full_metadata(
         # Update the query info in case of error, so that we don't come back to this
         # same channel on the next iteration.
         upsert_channel(cur, {"id": channel_id, **query_info})
-    
+
     try:
         channel_full = collegram.channels.get_full(
             client,
@@ -498,9 +490,6 @@ def single_chan_querier(
                 **base,
                 **query_info,
             }
-            # context.logger.debug(
-            #     f"row: {json.dumps(row, default=_iceberg_json_default)}"
-            # )
             with connection.cursor() as cur:
                 upsert_channel(cur, row)
 
