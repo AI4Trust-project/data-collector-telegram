@@ -1,0 +1,732 @@
+import datetime
+import json
+import os
+import time
+import uuid
+from pathlib import Path
+from typing import Optional
+
+import collegram
+import fsspec
+import nest_asyncio
+import polars as pl
+import psycopg
+import psycopg.rows
+from kafka import KafkaProducer
+from telethon import TelegramClient
+from telethon.errors import (
+    ChannelInvalidError,
+    ChannelPrivateError,
+    UsernameInvalidError,
+)
+from telethon.sessions import StringSession
+from telethon.types import InputPeerChannel, MessageService
+
+DB_NAME = os.environ.get("DATABASE_NAME")
+DB_USER = os.environ.get("DATABASE_USER")
+DB_PASSWORD = os.environ.get("DATABASE_PASSWORD")
+DB_HOST = os.environ.get("DATABASE_HOST")
+TELEGRAM_OWNER = os.environ["TELEGRAM_OWNER"]
+
+RELS_TABLE = "telegram.channels_rels"
+WAIT_INTERVAL = 60
+DELAY = 10
+
+
+async def init_context(context):
+    access_key = os.environ["MINIO_ACCESS_KEY"]
+    secret = os.environ["MINIO_SECRET_KEY"]
+    minio_home = os.environ["MINIO_HOME"]
+    storage_options = {
+        "endpoint_url": f"https://{minio_home}",
+        "key": access_key,
+        "secret": secret,
+    }
+    fs = fsspec.filesystem("s3", **storage_options)
+    setattr(context, "fs", fs)
+
+    # Connect to an existing database
+    connection = psycopg.connect(
+        user=DB_USER,
+        password=DB_PASSWORD,
+        host=DB_HOST,
+        dbname=DB_NAME,
+    )
+    connection.autocommit = True
+    setattr(context, "connection", connection)
+
+    # prefix = os.environ["TELEGRAM_OWNER"].upper()
+    client = TelegramClient(
+        StringSession(os.environ["AI4TRUST_TG_SESSION"]),
+        os.environ["AI4TRUST_API_ID"],
+        os.environ["AI4TRUST_API_HASH"],
+        flood_sleep_threshold=24 * 3600,
+    )
+    await client.start(os.environ["AI4TRUST_PHONE_NUMBER"])
+    setattr(context, "client", client)
+
+    # init kafka producer
+    broker = os.environ.get("KAFKA_BROKER")
+    producer = KafkaProducer(
+        bootstrap_servers=broker,
+        key_serializer=lambda x: x.encode("utf-8"),
+        value_serializer=lambda x: json.dumps(x, default=_iceberg_json_default).encode(
+            "utf-8"
+        ),
+    )
+    setattr(context, "producer", producer)
+
+
+def _json_default(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    else:
+        return repr(value)
+
+
+def _iceberg_json_default(value):
+    if isinstance(value, datetime.datetime):
+        return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        return repr(value)
+
+
+def iceberg_json_dumps(d: dict):
+    return json.dumps(d, default=_iceberg_json_default).encode("utf-8")
+
+
+def gen_query_info(query_time=None):
+    if query_time is None:
+        query_time = datetime.datetime.now().astimezone(datetime.timezone.utc)
+    return {
+        "query_id": str(uuid.uuid4()),
+        "query_date": query_time,
+        "data_owner": TELEGRAM_OWNER,
+    }
+
+
+def gen_msg_key(row: dict):
+    return "+".join(
+        str(p)
+        for p in [
+            row.get("search_id"),
+            row["source_channel_id"],
+            row["id"],
+            row["query_id"],
+        ]
+    )
+
+
+def count(cur, table, kwargs):
+    where = " AND ".join("%s=%%s" % pkf for pkf in kwargs)
+    where_args = [kwargs[pkf] for pkf in kwargs]
+    cur.execute(
+        "SELECT COUNT(*) FROM %s WHERE %s" % (table, where),
+        where_args,
+    )
+    r = cur.fetchone()
+    if r:
+        return r[0]
+
+    return 0
+
+
+def upsert(cur, table, pk_fields, kwargs):
+    # check to see if it already exists
+    where = " AND ".join("%s=%%s" % pkf for pkf in pk_fields)
+    where_args = [kwargs[pkf] for pkf in pk_fields]
+    cur.execute("SELECT COUNT(*) FROM %s WHERE %s LIMIT 1" % (table, where), where_args)
+    fields = [f for f in kwargs.keys()]
+    if cur.fetchone()[0] > 0:
+        set_clause = ", ".join("%s=%%s" % f for f in fields if f not in pk_fields)
+        set_args = [kwargs[f] for f in fields if f not in pk_fields]
+        cur.execute(
+            "UPDATE %s SET %s WHERE %s" % (table, set_clause, where),
+            set_args + where_args,
+        )
+        return False
+    else:
+        field_placeholders = ["%s"] * len(fields)
+        fmt_args = (table, ",".join(fields), ",".join(field_placeholders))
+        insert_args = [kwargs[f] for f in fields]
+        cur.execute("INSERT INTO %s (%s) VALUES (%s)" % fmt_args, insert_args)
+        return True
+
+
+def upsert_channel(cur, channel):
+    upsert(cur, "telegram.channels", ["id"], channel)
+
+
+def upsert_relation(
+    cur,
+    source,
+    source_parent,
+    dest,
+    dest_parent,
+    relation,
+    nr_messages,
+    first_discovered,
+    last_discovered,
+):
+    cur.execute(
+        f"INSERT INTO {RELS_TABLE} (source, source_parent, destination, destination_parent, relation, nr_messages, first_discovered, last_discovered) "
+        f" VALUES({source}, {source_parent}, {dest}, {dest_parent}, '{relation}', {nr_messages}, %s, %s) "
+        " ON CONFLICT(source, destination, relation) "
+        f" DO UPDATE SET last_discovered=%s, nr_messages=nr_messages + EXCLUDED.nr_messages",
+        [first_discovered, last_discovered, last_discovered],
+    )
+
+
+def get_input_chan(
+    client,
+    channel_username: Optional[str] = None,
+    channel_id: Optional[int] = None,
+    access_hash: Optional[int] = None,
+):
+    try:
+        fwd_input_peer_channel = collegram.channels.get_input_peer(
+            client, channel_username, channel_id, access_hash
+        )
+        return fwd_input_peer_channel
+    except ChannelPrivateError:
+        # These channels are valid and have been seen for sure,
+        # might be private though. TODO: keep track of private channels!
+        return
+    except (ChannelInvalidError, UsernameInvalidError, ValueError):
+        # This should happen extremely rarely, still haven't figured
+        # out conditions under which it does.
+        return
+
+
+def get_new_link_stats(prev_stats, update_stats):
+    if prev_stats is None:
+        new_stats = update_stats
+    else:
+        new_stats = {
+            "nr_messages": prev_stats.get("nr_messages", 0)
+            + update_stats["nr_messages"],
+            "first_discovered": prev_stats.get(
+                "first_discovered", update_stats["first_message_date"]
+            ),
+            "last_discovered": update_stats["last_message_date"],
+        }
+    return new_stats
+
+
+def handle_linked(
+    channel_id,
+    parent_channel_id,
+    linked_username,
+    link_stats,
+    client,
+    connection,
+    pred_dist_from_core,
+    lang_priorities,
+):
+    # Insert channel if never found before
+    base_query = (
+        "SELECT"
+        " id,"
+        " parent_channel_id,"
+        " created_at,"
+        " channel_last_queried_at,"
+        " language_code,"
+        " nr_participants,"
+        " message_count,"
+        " distance_from_core"
+        " FROM telegram.channels"
+    )
+    with connection.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(base_query + f" WHERE username = '{linked_username}'")
+        linked_data = cur.fetchone()
+    exists = linked_data is not None
+    if not exists:
+        input_peer_channel = get_input_chan(client, channel_username=linked_username)
+        if not isinstance(input_peer_channel, InputPeerChannel):
+            return
+
+        # Here there is a possibility the username changed, so check again the existence
+        # based on the ID.
+        with connection.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(base_query + f" WHERE id = {input_peer_channel.channel_id}")
+            linked_data = cur.fetchone()
+
+        exists = linked_data is not None
+        if not exists:
+            dist_from_core = pred_dist_from_core + 1
+            priority = collegram.channels.get_centrality_score(dist_from_core, 0, 0, 1)
+            insert_d = {
+                "id": input_peer_channel.channel_id,
+                "access_hash": input_peer_channel.access_hash,
+                "username": linked_username,
+                "data_owner": os.environ["TELEGRAM_OWNER"],
+                "distance_from_core": dist_from_core,
+                "metadata_collection_priority": priority,
+            }
+            collegram.utils.insert_into_postgres(
+                connection, "telegram.channels", insert_d
+            )
+
+    # Upsert relation. If the parent ID is unknown (so didn't go through
+    # `chan-querier`), consider channel as its own parent.
+    linked_parent_channel_id = linked_data["parent_channel_id"] or linked_data["id"]
+    with connection.cursor() as cur:
+        upsert_relation(
+            cur,
+            channel_id,
+            parent_channel_id,
+            linked_data["id"],
+            linked_parent_channel_id,
+            "linked",
+            **link_stats,
+        )
+
+    # If channel has already been queried by `chan-querier`, then recompute
+    # priority.
+    if exists and linked_data["channel_last_queried_at"] is not None:
+        with connection.cursor() as cur:
+            # count incoming relations to evaluate priority
+            nr_forwarding_channels, nr_linking_channels, nr_recommending_channels = [
+                count(
+                    cur,
+                    RELS_TABLE,
+                    {
+                        "destination_parent": linked_data["parent_channel_id"],
+                        "relation": rel,
+                    },
+                )
+                for rel in ("forwarded", "linked", "recommended")
+            ]
+
+        new_dist_from_core = min(
+            pred_dist_from_core + 1, linked_data["distance_from_core"]
+        )
+        lifespan_seconds = (
+            linked_data["created_at"] - linked_data["channel_last_queried_at"]
+        ).total_seconds()
+        priority = collegram.channels.get_explo_priority(
+            linked_data["language_code"],
+            linked_data["message_count"],
+            linked_data["nr_participants"],
+            lifespan_seconds,
+            new_dist_from_core,
+            nr_forwarding_channels,
+            nr_recommending_channels,
+            nr_linking_channels,
+            lang_priorities,
+            acty_slope=5,
+        )
+        central_priority = collegram.channels.get_centrality_score(
+            new_dist_from_core,
+            nr_forwarding_channels,
+            nr_recommending_channels,
+            nr_linking_channels,
+        )
+        update_d = {
+            "id": linked_data["id"],
+            "distance_from_core": new_dist_from_core,
+            "collection_priority": priority,
+            "metadata_collection_priority": central_priority,
+        }
+        update_d["collection_priority"] = priority
+        collegram.utils.update_postgres(connection, "telegram.channels", update_d, "id")
+
+
+def handle_forwarded(
+    channel_id,
+    parent_channel_id,
+    fwd_id,
+    fwd_stats,
+    client,
+    connection,
+    pred_dist_from_core,
+    lang_priorities,
+):
+    # Insert channel if never found before
+    base_query = (
+        "SELECT"
+        " id,"
+        " parent_channel_id,"
+        " created_at,"
+        " channel_last_queried_at,"
+        " language_code,"
+        " nr_participants,"
+        " message_count,"
+        " distance_from_core"
+        " FROM telegram.channels"
+    )
+    with connection.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(base_query + f" WHERE id = {fwd_id}")
+        fwd_data = cur.fetchone()
+    exists = fwd_data is not None
+    if not exists:
+        input_peer_channel = get_input_chan(client, channel_id=fwd_id)
+        if isinstance(input_peer_channel, InputPeerChannel):
+            dist_from_core = pred_dist_from_core + 1
+            priority = collegram.channels.get_centrality_score(dist_from_core, 1, 0, 0)
+            insert_d = {
+                "id": input_peer_channel.channel_id,
+                "access_hash": input_peer_channel.access_hash,
+                "data_owner": os.environ["TELEGRAM_OWNER"],
+                "distance_from_core": dist_from_core,
+                "metadata_collection_priority": priority,
+            }
+            collegram.utils.insert_into_postgres(
+                connection, "telegram.channels", insert_d
+            )
+
+    # Upsert relation. If the parent ID is unknown (so didn't go through
+    # `chan-querier`), consider channel as its own parent.
+    fwd_parent_channel_id = fwd_data["parent_channel_id"] or fwd_data["id"]
+    with connection.cursor() as cur:
+        upsert_relation(
+            cur,
+            channel_id,
+            parent_channel_id,
+            fwd_data["id"],
+            fwd_parent_channel_id,
+            "forwarded",
+            **fwd_stats,
+        )
+
+    # If channel has already been queried by `chan-querier`, then recompute
+    # priority.
+    if exists and fwd_data["channel_last_queried_at"] is not None:
+        with connection.cursor() as cur:
+            # count incoming relations to evaluate priority
+            nr_forwarding_channels, nr_linking_channels, nr_recommending_channels = [
+                count(
+                    cur,
+                    RELS_TABLE,
+                    {
+                        "destination_parent": fwd_data["parent_channel_id"],
+                        "relation": rel,
+                    },
+                )
+                for rel in ("forwarded", "linked", "recommended")
+            ]
+
+        new_dist_from_core = min(
+            pred_dist_from_core + 1, fwd_data["distance_from_core"]
+        )
+        lifespan_seconds = (
+            fwd_data["created_at"] - fwd_data["channel_last_queried_at"]
+        ).total_seconds()
+        priority = collegram.channels.get_explo_priority(
+            fwd_data["language_code"],
+            fwd_data["message_count"],
+            fwd_data["nr_participants"],
+            lifespan_seconds,
+            new_dist_from_core,
+            nr_forwarding_channels,
+            nr_recommending_channels,
+            nr_linking_channels,
+            lang_priorities,
+            acty_slope=5,
+        )
+        central_priority = collegram.channels.get_centrality_score(
+            new_dist_from_core,
+            nr_forwarding_channels,
+            nr_recommending_channels,
+            nr_linking_channels,
+        )
+        update_d = {
+            "id": fwd_data["id"],
+            "distance_from_core": new_dist_from_core,
+            "collection_priority": priority,
+            "metadata_collection_priority": central_priority,
+        }
+        update_d["collection_priority"] = priority
+        collegram.utils.update_postgres(connection, "telegram.channels", update_d, "id")
+
+def gen_message_msg_key(row: dict):
+    return "+".join(
+        str(p)
+        for p in [
+            row["channel_id"],
+            row["query_id"],
+            row["id"],
+        ]
+    )
+
+async def collect_messages(
+    client: TelegramClient,
+    channel,
+    dt_from: datetime.datetime,
+    dt_to: datetime.datetime,
+    forwards_stats: dict[int, dict],
+    linked_chans_stats: dict[str, dict],
+    anon_func,
+    media_save_path: Path,
+    fs,
+    producer,
+    query_info,
+    offset_id=0,
+):
+    last_id = offset_id
+    # Pass `fs` to following call to write embedded web pages as json artifacts
+    async for m in collegram.messages.yield_channel_messages(
+        client,
+        channel,
+        dt_from,
+        dt_to,
+        forwards_stats,
+        linked_chans_stats,
+        anon_func,
+        media_save_path,
+        offset_id=offset_id,
+        fs=fs,
+    ):
+        m_dict = {**m.to_dict(), **query_info}
+        msg_key = gen_message_msg_key(m_dict)
+        # MessageService have so many potential structures that putting them together
+        # with normal messages in a table does not make sense.
+        if isinstance(m, MessageService):
+            producer.send(
+                "telegram.raw_service_messages", key=msg_key, value=m_dict
+            )
+        else:
+            producer.send("telegram.raw_messages", key=msg_key, value=m_dict)
+            m_dict = collegram.messages.flatten_dict(m, m_dict)
+            producer.send("telegram.messages", key=msg_key, value=m_dict)
+        last_id = m.id
+    return last_id
+
+
+def single_chan_messages_querier(
+    context,
+    requery_after: datetime.timedelta,
+    start_at: datetime.datetime,
+    stop_at: datetime.datetime,
+    lang_priorities: dict,
+):
+    producer = context.producer
+    client = context.client
+    connection = context.connection
+    fs = context.fs
+
+    try:
+        dt_to = (
+            datetime.datetime.now().astimezone(datetime.timezone.utc) - requery_after
+        )
+        dt_to_str = dt_to.isoformat()
+        only_top_priority = "ORDER BY collection_priority ASC LIMIT 1"
+        can_query = "(NOT is_private) AND (NOT is_invalid)"
+        cols = "id, access_hash, username, parent_channel_id, messages_last_queried_at, last_queried_message_id, distance_from_core"
+        with connection.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            # First look for already-queried channel for which we need new messages
+            cur.execute(
+                f"SELECT {cols} FROM telegram.channels"
+                f" WHERE {can_query}"
+                f" AND messages_last_queried_at < TIMESTAMP '{dt_to_str}'"
+                f" {only_top_priority}"
+            )
+            data = cur.fetchone()
+
+            # If there is none, query a new one.
+            if data is None:
+                cur.execute(
+                    f"SELECT {cols} FROM telegram.channels"
+                    f" WHERE {can_query}"
+                    f" AND messages_last_queried_at IS NULL"
+                    f" {only_top_priority}"
+                )
+                data = cur.fetchone()
+
+        if data is None:
+            return False
+
+        channel_id = data.get("id")
+        parent_channel_id = data.get("parent_channel_id")
+        access_hash = data.get("access_hash")
+        channel_username = data.get("username")
+        messages_last_queried_at = data.get("messages_last_queried_at")
+        message_offset_id = data.get("last_queried_message_id")
+        # distance from search core, as in number of hops
+        distance_from_core = data.get("distance_from_core", 0)
+
+        data_path = Path("/telegram/")
+        paths = collegram.paths.ProjectPaths(data=data_path)
+        media_save_path = paths.raw_data / "media"
+
+        dt_from = messages_last_queried_at or start_at
+        if isinstance(dt_from, str):
+            dt_from = datetime.datetime.fromisoformat(dt_from)
+        dt_from = dt_from.astimezone(datetime.timezone.utc)
+
+        query_info = gen_query_info()
+        try:
+            input_chat = get_input_chan(
+                client,
+                channel_username=channel_username,
+                channel_id=channel_id,
+                access_hash=access_hash,
+            )
+        except (
+            ChannelInvalidError,
+            ChannelPrivateError,
+            UsernameInvalidError,
+            ValueError,
+        ) as e:
+            # If multiple keys: for all but ChannelPrivateError, can try with another
+            # key
+            # ValueError corresponds to deactivated chats
+            context.logger.warning(
+                f"Could not get channel metadata from channel {channel_id}"
+            )
+            flat_channel_d = {
+                "id": channel_id,
+                "username": channel_username,
+                "is_private": True,
+                **query_info,
+            }
+            msg_key = gen_msg_key(flat_channel_d)
+            # Update the query info in case of error, so that we don't come back to this
+            # same channel on the next iteration.
+            if isinstance(e, ChannelPrivateError):
+                flat_channel_d["is_private"] = True
+                with connection.cursor() as cur:
+                    upsert_channel(cur, flat_channel_d)
+                producer.send(
+                    "telegram.channel_metadata", key=msg_key, value=flat_channel_d
+                )
+            else:
+                flat_channel_d["is_invalid"] = True
+                with connection.cursor() as cur:
+                    upsert_channel(cur, flat_channel_d)
+                producer.send(
+                    "telegram.channel_metadata", key=msg_key, value=flat_channel_d
+                )
+            context.logger.info(
+                f"# Collecting messages from {channel_username} username, with ID {channel_id}"
+            )
+            return e
+
+        anon_func = lambda x: x
+
+        update_d = {
+            "id": channel_id,
+            "messages_last_queried_at": query_info["query_date"],
+        }
+        collegram.utils.update_postgres(connection, "telegram.channels", update_d, "id")
+
+        # Collect by chunks of maximum a month to limit effects of a crash on the
+        # collection.
+        dt_bin_edges = pl.datetime_range(
+            dt_from, stop_at, interval="1mo", eager=True, time_zone="UTC"
+        )
+
+        forwarded_chans_stats = {}
+        linked_chans_stats = {}
+
+        for dt_from, dt_to in zip(dt_bin_edges[:-1], dt_bin_edges[1:]):
+            chunk_fwds_stats = {}
+            chunk_linked_chans_stats = {}
+
+            query_info = gen_query_info()
+            query_info["channel_id"] = input_chat.channel_id
+            query_info["message_offset_id"] = message_offset_id
+
+            context.logger.info(f"## Collecting messages from {dt_from} to {dt_to}")
+            last_queried_message_id = client.loop.run_until_complete(
+                collect_messages(
+                    client,
+                    input_chat,
+                    dt_from,
+                    dt_to,
+                    chunk_fwds_stats,
+                    chunk_linked_chans_stats,
+                    anon_func,
+                    media_save_path,
+                    fs,
+                    producer,
+                    query_info,
+                    offset_id=message_offset_id,
+                )
+            )
+
+            update_d = {
+                "id": channel_id,
+                "last_queried_message_id": last_queried_message_id,
+            }
+            collegram.utils.update_postgres(
+                connection, "telegram.channels", update_d, "id"
+            )
+            # TODO: needed?
+            # # Save metadata about the query itself
+            # m = json.loads(json.dumps(query_info, default=_json_default))
+            # producer.send("telegram.queries", value=m)
+
+            for fwd_id, fwd_stats in chunk_fwds_stats.items():
+                prev_stats = forwarded_chans_stats.get(fwd_id)
+                end_chunk_stats = get_new_link_stats(prev_stats, fwd_stats)
+                handle_forwarded(
+                    channel_id,
+                    parent_channel_id,
+                    fwd_id,
+                    end_chunk_stats,
+                    client,
+                    connection,
+                    distance_from_core,
+                    lang_priorities,
+                )
+                forwarded_chans_stats[fwd_id] = end_chunk_stats
+
+            for link_un, link_stats in chunk_linked_chans_stats.items():
+                prev_stats = linked_chans_stats.get(link_un)
+                end_chunk_stats = get_new_link_stats(prev_stats, link_stats)
+                handle_linked(
+                    channel_id,
+                    parent_channel_id,
+                    link_un,
+                    end_chunk_stats,
+                    client,
+                    connection,
+                    distance_from_core,
+                    lang_priorities,
+                )
+                linked_chans_stats[link_un] = end_chunk_stats
+
+        # done.
+        context.logger.info(f"Channel {channel_id} messages collected")
+        return True
+
+    except Exception as e:
+        context.logger.error(f"Could not get messages from channel {channel_id}")
+        return e
+
+
+def handler(context, event):
+    # Triggered by chans_to_query
+    nest_asyncio.apply()
+    # Set relative priority for project's languages. Since the language detection is
+    # surely not 100% reliable, have to allow for popular channels not detected as using
+    # these to be collectable.
+    lang_priorities = {
+        lc: 1e-3 for lc in ["EN", "FR", "ES", "DE", "EL", "IT", "PL", "RO"]
+    }
+    requery_after = datetime.timedelta(days=1)
+    start_at = datetime.datetime(2025, 1, 1).astimezone(datetime.timezone.utc)
+    # Stop two days before now in order to get more or less final reaction + view counts
+    stop_at = datetime.datetime.now().astimezone(
+        datetime.timezone.utc
+    ) - datetime.timedelta(days=2)
+
+    context.logger.info("Start loop on channels to query")
+
+    while True:
+        result = single_chan_messages_querier(
+            context, requery_after, start_at, stop_at, lang_priorities
+        )
+        if isinstance(result, Exception):
+            context.logger.error(repr(result))
+            # wait on error
+            time.sleep(DELAY)
+        elif result is False:
+            # wait on no data
+            time.sleep(WAIT_INTERVAL)
+        else:
+            # min wait to stagger requests
+            time.sleep(0.05)
+
+    return "Stopped"
