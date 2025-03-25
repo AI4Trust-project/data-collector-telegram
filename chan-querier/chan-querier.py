@@ -136,7 +136,7 @@ def upsert_recommended(cur, source, source_parent, dest, dest_parent, query_time
     cur.execute(
         f"INSERT INTO {RELS_TABLE} (source, source_parent, destination, destination_parent, relation, first_discovered, last_discovered) "
         f" VALUES({source}, {source_parent}, {dest}, {dest_parent},'recommended',%s,%s) "
-        " ON CONFLICT(source, destination) "
+        " ON CONFLICT(source, destination, relation) "
         f" DO UPDATE SET last_discovered=%s",
         [query_time, query_time, query_time],
     )
