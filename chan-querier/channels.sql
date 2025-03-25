@@ -7,6 +7,7 @@ CREATE TABLE
         parent_channel_id BIGINT,
         is_private BOOLEAN DEFAULT FALSE,
         is_invalid BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP WITH TIME ZONE,
         channel_last_queried_at TIMESTAMP WITH TIME ZONE,
         messages_last_queried_at TIMESTAMP WITH TIME ZONE,
         last_queried_message_id INT DEFAULT 0,

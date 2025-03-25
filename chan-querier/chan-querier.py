@@ -489,6 +489,7 @@ def single_chan_querier(
                 "username": chat.username,
                 "parent_channel_id": parent_channel.id,
                 "source_channel_id": source_channel_id,
+                "created_at": chat.date.astimezone(datetime.timezone.utc),
                 "language_code": lang_code,
                 "nr_participants": participants_count,
                 "distance_from_core": distance_from_core,
