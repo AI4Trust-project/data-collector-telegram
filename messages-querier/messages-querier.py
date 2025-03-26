@@ -302,7 +302,7 @@ def handle_linked(
             pred_dist_from_core + 1, linked_data["distance_from_core"]
         )
         lifespan_seconds = (
-            linked_data["created_at"] - linked_data["channel_last_queried_at"]
+            linked_data["channel_last_queried_at"] - linked_data["created_at"]
         ).total_seconds()
         priority = collegram.channels.get_explo_priority(
             linked_data["language_code"],
@@ -410,7 +410,7 @@ def handle_forwarded(
             pred_dist_from_core + 1, fwd_data["distance_from_core"]
         )
         lifespan_seconds = (
-            fwd_data["created_at"] - fwd_data["channel_last_queried_at"]
+            fwd_data["channel_last_queried_at"] - fwd_data["created_at"]
         ).total_seconds()
         priority = collegram.channels.get_explo_priority(
             fwd_data["language_code"],
