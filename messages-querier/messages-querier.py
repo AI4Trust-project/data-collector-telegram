@@ -213,6 +213,53 @@ def get_new_link_stats(prev_stats, update_stats):
     return new_stats
 
 
+def reassign_prio(chan_data, pred_dist_from_core, lang_priorities, connection):
+    with connection.cursor() as cur:
+        # count incoming relations to evaluate priority
+        nr_forwarding_channels, nr_linking_channels, nr_recommending_channels = [
+            count(
+                cur,
+                RELS_TABLE,
+                {
+                    "destination_parent": chan_data["parent_channel_id"],
+                    "relation": rel,
+                },
+            )
+            for rel in ("forwarded", "linked", "recommended")
+        ]
+
+    new_dist_from_core = min(pred_dist_from_core + 1, chan_data["distance_from_core"])
+    lifespan_seconds = (
+        chan_data["channel_last_queried_at"] - chan_data["created_at"]
+    ).total_seconds()
+    priority = collegram.channels.get_explo_priority(
+        chan_data["language_code"],
+        chan_data["message_count"],
+        chan_data["nr_participants"],
+        lifespan_seconds,
+        new_dist_from_core,
+        nr_forwarding_channels,
+        nr_recommending_channels,
+        nr_linking_channels,
+        lang_priorities,
+        acty_slope=5,
+    )
+    central_priority = collegram.channels.get_centrality_score(
+        new_dist_from_core,
+        nr_forwarding_channels,
+        nr_recommending_channels,
+        nr_linking_channels,
+    )
+    update_d = {
+        "id": chan_data["id"],
+        "distance_from_core": new_dist_from_core,
+        "collection_priority": priority,
+        "metadata_collection_priority": central_priority,
+    }
+    update_d["collection_priority"] = priority
+    collegram.utils.update_postgres(connection, "telegram.channels", update_d, "id")
+
+
 def handle_linked(
     channel_id,
     parent_channel_id,
@@ -284,52 +331,7 @@ def handle_linked(
     # If channel has already been queried by `chan-querier`, then recompute
     # priority.
     if exists and linked_data["channel_last_queried_at"] is not None:
-        with connection.cursor() as cur:
-            # count incoming relations to evaluate priority
-            nr_forwarding_channels, nr_linking_channels, nr_recommending_channels = [
-                count(
-                    cur,
-                    RELS_TABLE,
-                    {
-                        "destination_parent": linked_data["parent_channel_id"],
-                        "relation": rel,
-                    },
-                )
-                for rel in ("forwarded", "linked", "recommended")
-            ]
-
-        new_dist_from_core = min(
-            pred_dist_from_core + 1, linked_data["distance_from_core"]
-        )
-        lifespan_seconds = (
-            linked_data["channel_last_queried_at"] - linked_data["created_at"]
-        ).total_seconds()
-        priority = collegram.channels.get_explo_priority(
-            linked_data["language_code"],
-            linked_data["message_count"],
-            linked_data["nr_participants"],
-            lifespan_seconds,
-            new_dist_from_core,
-            nr_forwarding_channels,
-            nr_recommending_channels,
-            nr_linking_channels,
-            lang_priorities,
-            acty_slope=5,
-        )
-        central_priority = collegram.channels.get_centrality_score(
-            new_dist_from_core,
-            nr_forwarding_channels,
-            nr_recommending_channels,
-            nr_linking_channels,
-        )
-        update_d = {
-            "id": linked_data["id"],
-            "distance_from_core": new_dist_from_core,
-            "collection_priority": priority,
-            "metadata_collection_priority": central_priority,
-        }
-        update_d["collection_priority"] = priority
-        collegram.utils.update_postgres(connection, "telegram.channels", update_d, "id")
+        reassign_prio(linked_data, pred_dist_from_core, lang_priorities, connection)
 
 
 def handle_forwarded(
@@ -392,52 +394,8 @@ def handle_forwarded(
     # If channel has already been queried by `chan-querier`, then recompute
     # priority.
     if exists and fwd_data["channel_last_queried_at"] is not None:
-        with connection.cursor() as cur:
-            # count incoming relations to evaluate priority
-            nr_forwarding_channels, nr_linking_channels, nr_recommending_channels = [
-                count(
-                    cur,
-                    RELS_TABLE,
-                    {
-                        "destination_parent": fwd_data["parent_channel_id"],
-                        "relation": rel,
-                    },
-                )
-                for rel in ("forwarded", "linked", "recommended")
-            ]
+        reassign_prio(fwd_data, pred_dist_from_core, lang_priorities, connection)
 
-        new_dist_from_core = min(
-            pred_dist_from_core + 1, fwd_data["distance_from_core"]
-        )
-        lifespan_seconds = (
-            fwd_data["channel_last_queried_at"] - fwd_data["created_at"]
-        ).total_seconds()
-        priority = collegram.channels.get_explo_priority(
-            fwd_data["language_code"],
-            fwd_data["message_count"],
-            fwd_data["nr_participants"],
-            lifespan_seconds,
-            new_dist_from_core,
-            nr_forwarding_channels,
-            nr_recommending_channels,
-            nr_linking_channels,
-            lang_priorities,
-            acty_slope=5,
-        )
-        central_priority = collegram.channels.get_centrality_score(
-            new_dist_from_core,
-            nr_forwarding_channels,
-            nr_recommending_channels,
-            nr_linking_channels,
-        )
-        update_d = {
-            "id": fwd_data["id"],
-            "distance_from_core": new_dist_from_core,
-            "collection_priority": priority,
-            "metadata_collection_priority": central_priority,
-        }
-        update_d["collection_priority"] = priority
-        collegram.utils.update_postgres(connection, "telegram.channels", update_d, "id")
 
 def gen_message_msg_key(row: dict):
     return "+".join(
