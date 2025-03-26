@@ -469,7 +469,7 @@ def single_chan_messages_querier(
         )
         dt_to_str = dt_to.isoformat()
         only_top_priority = "ORDER BY collection_priority ASC LIMIT 1"
-        can_query = "(NOT is_private) AND (NOT is_invalid)"
+        can_query = "(NOT is_private) AND (NOT is_invalid) AND collection_priority IS NOT NULL"
         cols = "id, access_hash, username, parent_channel_id, messages_last_queried_at, last_queried_message_id, distance_from_core"
         with connection.cursor(row_factory=psycopg.rows.dict_row) as cur:
             # First look for already-queried channel for which we need new messages
