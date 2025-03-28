@@ -8,7 +8,7 @@ CREATE TABLE
         nr_messages BIGINT,
         first_discovered TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         last_discovered TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (source, destination)
+        PRIMARY KEY (source, destination, relation)
     );
 
 CREATE INDEX telegram_channels_rels_idx ON telegram.channels_rels (source);
