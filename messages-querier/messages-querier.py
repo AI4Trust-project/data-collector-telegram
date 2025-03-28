@@ -410,6 +410,7 @@ def gen_message_msg_key(row: dict):
         ]
     )
 
+
 async def collect_messages(
     client: TelegramClient,
     channel,
@@ -443,9 +444,7 @@ async def collect_messages(
         # MessageService have so many potential structures that putting them together
         # with normal messages in a table does not make sense.
         if isinstance(m, MessageService):
-            producer.send(
-                "telegram.raw_service_messages", key=msg_key, value=m_dict
-            )
+            producer.send("telegram.raw_service_messages", key=msg_key, value=m_dict)
         else:
             producer.send("telegram.raw_messages", key=msg_key, value=m_dict)
             m_dict = collegram.messages.flatten_dict(m, m_dict)
@@ -588,7 +587,7 @@ def single_chan_messages_querier(
             query_info["channel_id"] = input_chat.channel_id
             query_info["message_offset_id"] = message_offset_id
 
-            context.logger.info(f"## Collecting messages from {dt_from} to {dt_to}")
+            context.logger.info(f"## Collecting messages from {dt_from.date()} to {dt_to.date()}")
             last_queried_message_id = client.loop.run_until_complete(
                 collect_messages(
                     client,
