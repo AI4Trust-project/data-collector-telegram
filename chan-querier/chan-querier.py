@@ -284,9 +284,9 @@ def get_full_metadata(
         )
         flat_channel_d = {
             "id": channel_id,
+            "access_hash": 0,
             "source_channel_id": source_channel_id,
             "username": channel_username,
-            "is_private": True,
             **base,
             **query_info,
         }
