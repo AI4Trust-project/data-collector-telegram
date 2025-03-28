@@ -172,7 +172,7 @@ def upsert_relation(
         f"INSERT INTO {RELS_TABLE} (source, source_parent, destination, destination_parent, relation, nr_messages, first_discovered, last_discovered) "
         f" VALUES({source}, {source_parent}, {dest}, {dest_parent}, '{relation}', {nr_messages}, %s, %s) "
         " ON CONFLICT(source, destination, relation) "
-        f" DO UPDATE SET last_discovered=%s, nr_messages=nr_messages + EXCLUDED.nr_messages",
+        f" DO UPDATE SET last_discovered = %s, nr_messages = {RELS_TABLE}.nr_messages + {nr_messages}",
         [first_message_date, last_message_date, last_message_date],
     )
 
