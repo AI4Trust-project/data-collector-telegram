@@ -165,15 +165,15 @@ def upsert_relation(
     dest_parent,
     relation,
     nr_messages,
-    first_discovered,
-    last_discovered,
+    first_message_date,
+    last_message_date,
 ):
     cur.execute(
         f"INSERT INTO {RELS_TABLE} (source, source_parent, destination, destination_parent, relation, nr_messages, first_discovered, last_discovered) "
         f" VALUES({source}, {source_parent}, {dest}, {dest_parent}, '{relation}', {nr_messages}, %s, %s) "
         " ON CONFLICT(source, destination, relation) "
         f" DO UPDATE SET last_discovered=%s, nr_messages=nr_messages + EXCLUDED.nr_messages",
-        [first_discovered, last_discovered, last_discovered],
+        [first_message_date, last_message_date, last_message_date],
     )
 
 
@@ -205,10 +205,10 @@ def get_new_link_stats(prev_stats, update_stats):
         new_stats = {
             "nr_messages": prev_stats.get("nr_messages", 0)
             + update_stats["nr_messages"],
-            "first_discovered": prev_stats.get(
-                "first_discovered", update_stats["first_message_date"]
+            "first_message_date": prev_stats.get(
+                "first_message_date", update_stats["first_message_date"]
             ),
-            "last_discovered": update_stats["last_message_date"],
+            "last_message_date": update_stats["last_message_date"],
         }
     return new_stats
 
