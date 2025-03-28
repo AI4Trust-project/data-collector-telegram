@@ -1,4 +1,5 @@
 git+https://github.com/TLouf/collegram.git@nuclio
 kafka-python
 psycopg[binary]
+s3fs
 nest_asyncio
