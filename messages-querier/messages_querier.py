@@ -557,11 +557,11 @@ def single_chan_messages_querier(
                 producer.send(
                     "telegram.channel_metadata", key=msg_key, value=flat_channel_d
                 )
-            context.logger.info(
-                f"# Collecting messages from {channel_username} username, with ID {channel_id}"
-            )
             return e
 
+        context.logger.info(
+            f"# Collecting messages from {channel_username} username, with ID {channel_id}"
+        )
         anon_func = lambda x: x
 
         update_d = {
