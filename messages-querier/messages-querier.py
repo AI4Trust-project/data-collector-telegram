@@ -447,8 +447,8 @@ async def collect_messages(
             producer.send("telegram.raw_service_messages", key=msg_key, value=m_dict)
         else:
             producer.send("telegram.raw_messages", key=msg_key, value=m_dict)
-            m_dict = collegram.messages.flatten_dict(m, m_dict)
-            producer.send("telegram.messages", key=msg_key, value=m_dict)
+            flat_dict = collegram.messages.to_flat_dict(m)
+            producer.send("telegram.messages", key=msg_key, value=flat_dict)
         last_id = m.id
     return last_id
 
