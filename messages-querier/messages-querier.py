@@ -286,8 +286,8 @@ def handle_linked(
     with connection.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(base_query + f" WHERE username = '{linked_username}'")
         linked_data = cur.fetchone()
-    exists = linked_data is not None
-    if not exists:
+
+    if linked_data is None:
         input_peer_channel = get_input_chan(client, channel_username=linked_username)
         if not isinstance(input_peer_channel, InputPeerChannel):
             return
@@ -298,12 +298,12 @@ def handle_linked(
             cur.execute(base_query + f" WHERE id = {input_peer_channel.channel_id}")
             linked_data = cur.fetchone()
 
-        exists = linked_data is not None
-        if not exists:
+        if linked_data is None:
             dist_from_core = pred_dist_from_core + 1
             priority = collegram.channels.get_centrality_score(dist_from_core, 0, 0, 1)
-            insert_d = {
+            linked_data = {
                 "id": input_peer_channel.channel_id,
+                "parent_channel_id": input_peer_channel.channel_id,
                 "access_hash": input_peer_channel.access_hash,
                 "username": linked_username,
                 "data_owner": os.environ["TELEGRAM_OWNER"],
@@ -311,27 +311,28 @@ def handle_linked(
                 "metadata_collection_priority": priority,
             }
             collegram.utils.insert_into_postgres(
-                connection, "telegram.channels", insert_d
+                connection, "telegram.channels", linked_data
             )
 
-    # Upsert relation. If the parent ID is unknown (so didn't go through
-    # `chan-querier`), consider channel as its own parent.
-    linked_parent_channel_id = linked_data["parent_channel_id"] or linked_data["id"]
-    with connection.cursor() as cur:
-        upsert_relation(
-            cur,
-            channel_id,
-            parent_channel_id,
-            linked_data["id"],
-            linked_parent_channel_id,
-            "linked",
-            **link_stats,
-        )
+    if linked_data is not None:
+        # Upsert relation. If the parent ID is unknown (so didn't go through
+        # `chan-querier`), consider channel as its own parent.
+        linked_parent_channel_id = linked_data["parent_channel_id"] or linked_data["id"]
+        with connection.cursor() as cur:
+            upsert_relation(
+                cur,
+                channel_id,
+                parent_channel_id,
+                linked_data["id"],
+                linked_parent_channel_id,
+                "linked",
+                **link_stats,
+            )
 
-    # If channel has already been queried by `chan-querier`, then recompute
-    # priority.
-    if exists and linked_data["channel_last_queried_at"] is not None:
-        reassign_prio(linked_data, pred_dist_from_core, lang_priorities, connection)
+        # If channel has already been queried by `chan-querier`, then recompute
+        # priority.
+        if linked_data.get("channel_last_queried_at") is not None:
+            reassign_prio(linked_data, pred_dist_from_core, lang_priorities, connection)
 
 
 def handle_forwarded(
@@ -360,41 +361,43 @@ def handle_forwarded(
     with connection.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(base_query + f" WHERE id = {fwd_id}")
         fwd_data = cur.fetchone()
-    exists = fwd_data is not None
-    if not exists:
+
+    if fwd_data is None:
         input_peer_channel = get_input_chan(client, channel_id=fwd_id)
         if isinstance(input_peer_channel, InputPeerChannel):
             dist_from_core = pred_dist_from_core + 1
             priority = collegram.channels.get_centrality_score(dist_from_core, 1, 0, 0)
-            insert_d = {
+            fwd_data = {
                 "id": input_peer_channel.channel_id,
+                "parent_channel_id": input_peer_channel.channel_id,
                 "access_hash": input_peer_channel.access_hash,
                 "data_owner": os.environ["TELEGRAM_OWNER"],
                 "distance_from_core": dist_from_core,
                 "metadata_collection_priority": priority,
             }
             collegram.utils.insert_into_postgres(
-                connection, "telegram.channels", insert_d
+                connection, "telegram.channels", fwd_data
             )
 
-    # Upsert relation. If the parent ID is unknown (so didn't go through
-    # `chan-querier`), consider channel as its own parent.
-    fwd_parent_channel_id = fwd_data["parent_channel_id"] or fwd_data["id"]
-    with connection.cursor() as cur:
-        upsert_relation(
-            cur,
-            channel_id,
-            parent_channel_id,
-            fwd_data["id"],
-            fwd_parent_channel_id,
-            "forwarded",
-            **fwd_stats,
-        )
+    if fwd_data is not None:
+        # Upsert relation. If the parent ID is unknown (so didn't go through
+        # `chan-querier`), consider channel as its own parent.
+        fwd_parent_channel_id = fwd_data["parent_channel_id"] or fwd_data["id"]
+        with connection.cursor() as cur:
+            upsert_relation(
+                cur,
+                channel_id,
+                parent_channel_id,
+                fwd_data["id"],
+                fwd_parent_channel_id,
+                "forwarded",
+                **fwd_stats,
+            )
 
-    # If channel has already been queried by `chan-querier`, then recompute
-    # priority.
-    if exists and fwd_data["channel_last_queried_at"] is not None:
-        reassign_prio(fwd_data, pred_dist_from_core, lang_priorities, connection)
+        # If channel has already been queried by `chan-querier`, then recompute
+        # priority.
+        if fwd_data.get("channel_last_queried_at") is not None:
+            reassign_prio(fwd_data, pred_dist_from_core, lang_priorities, connection)
 
 
 def gen_message_msg_key(row: dict):
