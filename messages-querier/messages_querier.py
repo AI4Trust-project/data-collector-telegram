@@ -685,6 +685,7 @@ def handler(context, event):
             # wait on error
             time.sleep(DELAY)
         elif result is False:
+            context.logger.info("Waiting for new channel to query.")
             # wait on no data
             time.sleep(WAIT_INTERVAL)
         else:
