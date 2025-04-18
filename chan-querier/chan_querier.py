@@ -25,7 +25,7 @@ DB_HOST = os.environ.get("DATABASE_HOST")
 TELEGRAM_OWNER = os.environ["TELEGRAM_OWNER"]
 
 RELS_TABLE = "telegram.channels_rels"
-WAIT_INTERVAL = 60
+WAIT_INTERVAL = 60 * 60  # 1 hour
 DELAY = 10
 
 
@@ -74,6 +74,7 @@ def _iceberg_json_default(value):
         return list(value)
     else:
         return repr(value)
+
 
 def get(cur, table, keys, kwargs):
     fields = [f for f in keys]
@@ -275,8 +276,8 @@ def get_full_metadata(
         # If multiple keys: for all but ChannelPrivateError, can try with another
         # key
         # ValueError corresponds to deactivated chats
-        context.logger.warning(
-            f"Could not get channel metadata from channel {channel_id}"
+        context.logger.error(
+            f"Could not get channel metadata from channel {channel_id}: {repr(e)}"
         )
         flat_channel_d = {
             "id": channel_id,
@@ -307,231 +308,221 @@ def get_full_metadata(
     return status, channel_full
 
 
-def single_chan_querier(
-    context, requery_after: datetime.timedelta, lang_priorities: dict
-):
-    producer = context.producer
-    client = context.client
+def next_channel(context, dt_to):
     connection = context.connection
-    lang_detector = context.lang_detector
 
     try:
-        dt_to = (
-            datetime.datetime.now().astimezone(datetime.timezone.utc) - requery_after
-        )
         dt_to_str = dt_to.isoformat()
         only_top_priority = "ORDER BY metadata_collection_priority ASC LIMIT 1;"
         where = (
             "WHERE (NOT is_private) AND (NOT is_invalid)"
             f" AND (query_date IS NULL OR query_date < TIMESTAMP '{dt_to_str}')"
         )
-        cols = "id, access_hash, username, parent_channel_id, distance_from_core, search_id, keyword_id, keyword"
+        cols = "id, access_hash, username, parent_channel_id, distance_from_core, search_id, keyword_id, keyword, query_date"
         with connection.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 f"SELECT {cols} FROM telegram.channels {where} {only_top_priority}"
             )
             data = cur.fetchone()
 
-        if data is None:
-            return False
-
-        source_channel_id = data.get("id")
-        parent_channel_id = data.get("parent_channel_id")
-        access_hash = data.get("access_hash")
-        channel_username = data.get("username")
-        # distance from search core, as in number of hops
-        distance_from_core = data.get("distance_from_core", 0)
-
-        # keep track of search
-        base = {
-            "search_id": data.get("search_id", None),
-            "keyword_id": data.get("keyword_id", None),
-            "keyword": data.get("keyword", None),
-        }
-
-        # collect full info for channel
-        src_query_info = gen_query_info()
-        context.logger.info(
-            f"Collecting channel metadata from channel {source_channel_id}"
-        )
-        status, channel_full = get_full_metadata(
-            context,
-            source_channel_id,
-            access_hash,
-            channel_username,
-            source_channel_id,
-            base,
-            src_query_info,
-        )
-        if status is not True:
-            return status
-        src_channel_full_d = json.loads(channel_full.to_json())
-
-        chats = [c for c in channel_full.chats if not getattr(c, "deactivated", False)]
-        parent_channel = chats[0]
-        for c in chats:
-            # If channelFull has more than one chat, this condition should be met for a
-            # single chat. Else, channelFull corresponds to a public supergroup, and we
-            # consider this discussion chat to be its own parent.
-            if c.broadcast:
-                parent_channel = c
-
-        if parent_channel_id is None:
-            parent_channel_id = parent_channel.id
-            for c in chats:
-                # update destination parent in rels
-                with connection.cursor() as cur:
-                    cur.execute(
-                        f"UPDATE {RELS_TABLE}"
-                        f" SET destination_parent = {parent_channel.id}"
-                        f" WHERE destination = {c.id}",
-                    )
-
-        context.logger.debug(
-            f"Receive relational channel data for channel {source_channel_id}"
-        )
-        with connection.cursor() as cur:
-            # count incoming relations to evaluate priority
-            nr_forwarding_channels, nr_linking_channels, nr_recommending_channels = [
-                count(
-                    cur,
-                    RELS_TABLE,
-                    {"destination_parent": parent_channel.id, "relation": rel},
-                )
-                for rel in ("forwarded", "linked", "recommended")
-            ]
-
-        # Place parent channel first to attribute its language to its children.
-        chats = [parent_channel] + [c for c in chats if c.id != parent_channel.id]
-
-        for chat in chats:
-            context.logger.info(f"## Collecting chat metadata for chat {chat.id}")
-            # Query only if necessary.
-            if chat.id != source_channel_id:
-                query_info = gen_query_info()
-                status, channel_full = get_full_metadata(
-                    context,
-                    chat.id,
-                    chat.access_hash,
-                    chat.username,
-                    source_channel_id,
-                    base,
-                    src_query_info,
-                    channel=chat,
-                )
-                if status is not True:
-                    return status
-                channel_full_d = json.loads(channel_full.to_json())
-            else:
-                query_info = src_query_info
-                channel_full_d = src_channel_full_d
-
-            query_time = query_info["query_date"]
-            channel_full_d.pop("users", None)
-            channel_full_d["source_channel_id"] = source_channel_id
-            channel_full_d["parent_channel_id"] = parent_channel_id
-            # Get count from full_chat and not from chat directly: latter is always
-            # null.
-            participants_count = channel_full_d["full_chat"]["participants_count"]
-
-            if chat.id == parent_channel.id:
-                # language detection on text
-                context.logger.debug(f"Detect language from channel {chat.id}")
-                lang_code = collegram.text.detect_chan_lang(
-                    channel_full_d, lang_detector
-                )
-                context.logger.debug(f"language {lang_code} for channel {chat.id}")
-
-            # message counts
-            context.logger.debug(
-                f"Collecting channel {source_channel_id} chat {chat.id} message counts"
-            )
-            for content_type, f in collegram.messages.MESSAGE_CONTENT_TYPE_MAP.items():
-                c = collegram.messages.get_channel_messages_count(client, chat, f)
-                channel_full_d[f"{content_type}_count"] = c
-
-            # (re)evaluate collection priority
-            lifespan_seconds = (
-                chat.date.replace(tzinfo=None) - query_time.replace(tzinfo=None)
-            ).total_seconds()
-            context.logger.debug(
-                f"Evaluate channel {source_channel_id} chat {chat.id} priority"
-            )
-            priority = collegram.channels.get_explo_priority(
-                lang_code,
-                channel_full_d.get("message_count", 1),
-                participants_count,
-                lifespan_seconds,
-                distance_from_core,
-                nr_forwarding_channels,
-                nr_recommending_channels,
-                nr_linking_channels,
-                lang_priorities,
-                acty_slope=5,
-            )
-
-            # write channel info to postgres
-            row = {
-                "id": chat.id,
-                "access_hash": chat.access_hash,
-                "username": chat.username,
-                "parent_channel_id": parent_channel.id,
-                "source_channel_id": source_channel_id,
-                "created_at": chat.date.astimezone(datetime.timezone.utc),
-                "language_code": lang_code,
-                "nr_participants": participants_count,
-                "distance_from_core": distance_from_core,
-                "message_count": channel_full_d.get("message_count", 1),
-                "collection_priority": priority,
-                **base,
-                **query_info,
-            }
-            with connection.cursor() as cur:
-                upsert_channel(cur, row)
-
-            # recommended
-            context.logger.debug(
-                f"Collecting channel {source_channel_id} chat {chat.id} recommended"
-            )
-            recommended_chans = collegram.channels.get_recommended(client, chat)
-            # forward recommended to querier
-            for recommended in recommended_chans:
-                handle_recommended(
-                    context,
-                    recommended,
-                    chat.id,
-                    source_channel_id,
-                    parent_channel_id,
-                    distance_from_core,
-                    query_info,
-                    base,
-                )
-
-            # send raw channel metadata to iceberg
-            # TODO: put recommended channels in there or rely on RELS_TABLE?
-            channel_full_d = {**channel_full_d, **query_info, **base}
-            msg_key = gen_msg_key(row)
-            producer.send(
-                "telegram.raw_channel_metadata", key=msg_key, value=channel_full_d
-            )
-
-            flat_channel_d = collegram.channels.flatten_dict(channel_full_d)
-            # send channel metadata to iceberg
-            producer.send(
-                "telegram.channel_metadata", key=msg_key, value=flat_channel_d
-            )
-
-        # done.
-        context.logger.info(
-            f"Channel {source_channel_id} info collected, {len(chats)} chats"
-        )
-        return True
-
+        return data
     except Exception as e:
-        context.logger.error(
-            f"Could not get channel metadata from channel {source_channel_id}"
+        context.logger.error(repr(next))
+        return False
+
+
+def single_chan_querier(context, data: dict, lang_priorities: dict):
+    producer = context.producer
+    client = context.client
+    connection = context.connection
+    lang_detector = context.lang_detector
+
+    # load the channel data
+    source_channel_id = data.get("id")
+    parent_channel_id = data.get("parent_channel_id", None)
+    access_hash = data.get("access_hash", None)
+    channel_username = data.get("username")
+    # distance from search core, as in number of hops
+    distance_from_core = data.get("distance_from_core", 0)
+
+    # keep track of search
+    base = {
+        "search_id": data.get("search_id", None),
+        "keyword_id": data.get("keyword_id", None),
+        "keyword": data.get("keyword", None),
+    }
+
+    # collect full info for channel
+    src_query_info = gen_query_info()
+    context.logger.info(f"Collecting channel metadata from channel {source_channel_id}")
+    status, channel_full = get_full_metadata(
+        context,
+        source_channel_id,
+        access_hash,
+        channel_username,
+        source_channel_id,
+        base,
+        src_query_info,
+    )
+    if status is not True:
+        return status
+    src_channel_full_d = json.loads(channel_full.to_json())
+
+    chats = [c for c in channel_full.chats if not getattr(c, "deactivated", False)]
+    parent_channel = chats[0]
+    for c in chats:
+        # If channelFull has more than one chat, this condition should be met for a
+        # single chat. Else, channelFull corresponds to a public supergroup, and we
+        # consider this discussion chat to be its own parent.
+        if c.broadcast:
+            parent_channel = c
+
+    if parent_channel_id is None:
+        parent_channel_id = parent_channel.id
+        for c in chats:
+            # update destination parent in rels
+            with connection.cursor() as cur:
+                cur.execute(
+                    f"UPDATE {RELS_TABLE}"
+                    f" SET destination_parent = {parent_channel.id}"
+                    f" WHERE destination = {c.id}",
+                )
+
+    context.logger.debug(
+        f"Receive relational channel data for channel {source_channel_id}"
+    )
+    with connection.cursor() as cur:
+        # count incoming relations to evaluate priority
+        nr_forwarding_channels, nr_linking_channels, nr_recommending_channels = [
+            count(
+                cur,
+                RELS_TABLE,
+                {"destination_parent": parent_channel.id, "relation": rel},
+            )
+            for rel in ("forwarded", "linked", "recommended")
+        ]
+
+    # Place parent channel first to attribute its language to its children.
+    chats = [parent_channel] + [c for c in chats if c.id != parent_channel.id]
+
+    for chat in chats:
+        context.logger.info(f"## Collecting chat metadata for chat {chat.id}")
+        # Query only if necessary.
+        if chat.id != source_channel_id:
+            query_info = gen_query_info()
+            status, channel_full = get_full_metadata(
+                context,
+                chat.id,
+                chat.access_hash,
+                chat.username,
+                source_channel_id,
+                base,
+                src_query_info,
+                channel=chat,
+            )
+            if status is not True:
+                return status
+            channel_full_d = json.loads(channel_full.to_json())
+        else:
+            query_info = src_query_info
+            channel_full_d = src_channel_full_d
+
+        query_time = query_info["query_date"]
+        channel_full_d.pop("users", None)
+        channel_full_d["source_channel_id"] = source_channel_id
+        channel_full_d["parent_channel_id"] = parent_channel_id
+        # Get count from full_chat and not from chat directly: latter is always
+        # null.
+        participants_count = channel_full_d["full_chat"]["participants_count"]
+
+        if chat.id == parent_channel.id:
+            # language detection on text
+            context.logger.debug(f"Detect language from channel {chat.id}")
+            lang_code = collegram.text.detect_chan_lang(channel_full_d, lang_detector)
+            context.logger.debug(f"language {lang_code} for channel {chat.id}")
+
+        # message counts
+        context.logger.debug(
+            f"Collecting channel {source_channel_id} chat {chat.id} message counts"
         )
-        return e
+        for content_type, f in collegram.messages.MESSAGE_CONTENT_TYPE_MAP.items():
+            c = collegram.messages.get_channel_messages_count(client, chat, f)
+            channel_full_d[f"{content_type}_count"] = c
+
+        # (re)evaluate collection priority
+        lifespan_seconds = (
+            chat.date.replace(tzinfo=None) - query_time.replace(tzinfo=None)
+        ).total_seconds()
+        context.logger.debug(
+            f"Evaluate channel {source_channel_id} chat {chat.id} priority"
+        )
+        priority = collegram.channels.get_explo_priority(
+            lang_code,
+            channel_full_d.get("message_count", 1),
+            participants_count,
+            lifespan_seconds,
+            distance_from_core,
+            nr_forwarding_channels,
+            nr_recommending_channels,
+            nr_linking_channels,
+            lang_priorities,
+            acty_slope=5,
+        )
+
+        # write channel info to postgres
+        row = {
+            "id": chat.id,
+            "access_hash": chat.access_hash,
+            "username": chat.username,
+            "parent_channel_id": parent_channel.id,
+            "source_channel_id": source_channel_id,
+            "created_at": chat.date.astimezone(datetime.timezone.utc),
+            "language_code": lang_code,
+            "nr_participants": participants_count,
+            "distance_from_core": distance_from_core,
+            "message_count": channel_full_d.get("message_count", 1),
+            "collection_priority": priority,
+            **base,
+            **query_info,
+        }
+        with connection.cursor() as cur:
+            upsert_channel(cur, row)
+
+        # recommended
+        context.logger.debug(
+            f"Collecting channel {source_channel_id} chat {chat.id} recommended"
+        )
+        recommended_chans = collegram.channels.get_recommended(client, chat)
+        # forward recommended to querier
+        for recommended in recommended_chans:
+            handle_recommended(
+                context,
+                recommended,
+                chat.id,
+                source_channel_id,
+                parent_channel_id,
+                distance_from_core,
+                query_info,
+                base,
+            )
+
+        # send raw channel metadata to iceberg
+        # TODO: put recommended channels in there or rely on RELS_TABLE?
+        channel_full_d = {**channel_full_d, **query_info, **base}
+        msg_key = gen_msg_key(row)
+        producer.send(
+            "telegram.raw_channel_metadata", key=msg_key, value=channel_full_d
+        )
+
+        flat_channel_d = collegram.channels.flatten_dict(channel_full_d)
+        # send channel metadata to iceberg
+        producer.send("telegram.channel_metadata", key=msg_key, value=flat_channel_d)
+
+    # done.
+    context.logger.info(
+        f"Channel {source_channel_id} info collected, {len(chats)} chats"
+    )
+    return True
 
 
 def handler(context, event):
@@ -545,19 +536,48 @@ def handler(context, event):
     }
     requery_after = datetime.timedelta(days=10)
 
-    context.logger.info("Start loop on channels to query")
+    data = None
+    body = event.body.decode("utf-8")
+    if body:
+        # load the event data
+        data = json.loads(body)
 
-    while True:
-        result = single_chan_querier(context, requery_after, lang_priorities)
-        if isinstance(result, Exception):
-            context.logger.error(repr(result))
-            # wait on error
-            time.sleep(DELAY)
-        elif result is False:
-            # wait on no data
-            time.sleep(WAIT_INTERVAL)
-        else:
-            # min wait to stagger requests
-            time.sleep(0.05)
+    # self feed
+    if data is None or data is False or "id" not in data:
+        dt_to = (
+            datetime.datetime.now().astimezone(datetime.timezone.utc) - requery_after
+        )
+        data = next_channel(context, dt_to)
 
-    return "Stopped"
+    if data is not None and data is not False and "id" in data:
+        # if data is a dict, it is the channel to query
+        try:
+            single_chan_querier(context, data, lang_priorities)
+        except Exception as e:
+            context.logger.error(
+                f"Could not get channel metadata from channel {data.get('id')}: {repr(e)}"
+            )
+
+    # enqueue the next channel to query
+    dt_to = datetime.datetime.now().astimezone(datetime.timezone.utc) - requery_after
+    next = next_channel(context, dt_to)
+
+    # loop if no next available
+    while next is None or next is False:
+        # wait longer if no data, shorter if error
+        delay = WAIT_INTERVAL if next is None else DELAY
+        time.sleep(delay)
+        dt_to = (
+            datetime.datetime.now().astimezone(datetime.timezone.utc) - requery_after
+        )
+        next = next_channel(context, dt_to)
+
+    # send channel to be queried
+    context.logger.info("Send channel to be queried: {}".format(next.get("id")))
+
+    msg_key = str(dt_to.timestamp()) + str(next.get("id"))
+    # msg_json = json.loads(json.dumps(next))
+    # send channel to be queried
+    context.producer.send("telegram.channels_to_query", key=msg_key, value=next)
+
+    return True

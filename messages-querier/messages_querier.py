@@ -29,7 +29,7 @@ DB_HOST = os.environ.get("DATABASE_HOST")
 TELEGRAM_OWNER = os.environ["TELEGRAM_OWNER"]
 
 RELS_TABLE = "telegram.channels_rels"
-WAIT_INTERVAL = 60
+WAIT_INTERVAL = 60 * 60  # 1 hour
 DELAY = 10
 
 
@@ -455,25 +455,15 @@ async def collect_messages(
     return last_id
 
 
-def single_chan_messages_querier(
-    context,
-    requery_after: datetime.timedelta,
-    start_at: datetime.datetime,
-    stop_at: datetime.datetime,
-    lang_priorities: dict,
-):
-    producer = context.producer
-    client = context.client
+def next_channel(context, dt_to):
     connection = context.connection
-    fs = context.fs
 
     try:
-        dt_to = (
-            datetime.datetime.now().astimezone(datetime.timezone.utc) - requery_after
-        )
         dt_to_str = dt_to.isoformat()
         only_top_priority = "ORDER BY collection_priority ASC LIMIT 1"
-        can_query = "(NOT is_private) AND (NOT is_invalid) AND collection_priority IS NOT NULL"
+        can_query = (
+            "(NOT is_private) AND (NOT is_invalid) AND collection_priority IS NOT NULL"
+        )
         cols = "id, access_hash, username, parent_channel_id, messages_last_queried_at, last_queried_message_id, distance_from_core"
         with connection.cursor(row_factory=psycopg.rows.dict_row) as cur:
             # First look for already-queried channel for which we need new messages
@@ -495,18 +485,37 @@ def single_chan_messages_querier(
                 )
                 data = cur.fetchone()
 
-        if data is None:
-            return False
+        return data
 
+    except Exception as e:
+        context.logger.error(repr(next))
+        return False
+
+
+def single_chan_messages_querier(
+    context,
+    data: dict,
+    start_at: datetime.datetime,
+    stop_at: datetime.datetime,
+    lang_priorities: dict,
+):
+    producer = context.producer
+    client = context.client
+    connection = context.connection
+    fs = context.fs
+
+    try:
+        # load the channel data
         channel_id = data.get("id")
-        parent_channel_id = data.get("parent_channel_id")
-        access_hash = data.get("access_hash")
+        parent_channel_id = data.get("parent_channel_id", None)
+        access_hash = data.get("access_hash", None)
         channel_username = data.get("username")
         messages_last_queried_at = data.get("messages_last_queried_at")
         message_offset_id = data.get("last_queried_message_id")
         # distance from search core, as in number of hops
         distance_from_core = data.get("distance_from_core", 0)
 
+        # TODO remove usage of s3
         data_path = Path("/telegram/")
         paths = collegram.paths.ProjectPaths(data=data_path)
         media_save_path = paths.raw_data / "media"
@@ -533,7 +542,7 @@ def single_chan_messages_querier(
             # If multiple keys: for all but ChannelPrivateError, can try with another
             # key
             # ValueError corresponds to deactivated chats
-            context.logger.warning(
+            context.logger.error(
                 f"Could not get channel metadata from channel {channel_id}"
             )
             flat_channel_d = {
@@ -589,7 +598,9 @@ def single_chan_messages_querier(
             query_info["channel_id"] = input_chat.channel_id
             query_info["message_offset_id"] = message_offset_id
 
-            context.logger.info(f"## Collecting messages from {dt_from.date()} to {dt_to.date()}")
+            context.logger.info(
+                f"## Collecting messages from {dt_from.date()} to {dt_to.date()}"
+            )
             last_queried_message_id = client.loop.run_until_complete(
                 collect_messages(
                     client,
@@ -654,7 +665,9 @@ def single_chan_messages_querier(
         return True
 
     except Exception as e:
-        context.logger.error(f"Could not get messages from channel {channel_id}")
+        context.logger.error(
+            f"Could not get messages from channel {channel_id}: {repr(e)}"
+        )
         return e
 
 
@@ -668,28 +681,57 @@ def handler(context, event):
         lc: 1e-3 for lc in ["EN", "FR", "ES", "DE", "EL", "IT", "PL", "RO"]
     }
     requery_after = datetime.timedelta(days=1)
-    start_at = datetime.datetime(2025, 1, 1).astimezone(datetime.timezone.utc)
-    # Stop two days before now in order to get more or less final reaction + view counts
-    stop_at = datetime.datetime.now().astimezone(
-        datetime.timezone.utc
-    ) - datetime.timedelta(days=2)
 
-    context.logger.info("Start loop on channels to query")
+    data = None
+    body = event.body.decode("utf-8")
+    if body:
+        # load the event data
+        data = json.loads(body)
 
-    while True:
-        result = single_chan_messages_querier(
-            context, requery_after, start_at, stop_at, lang_priorities
+    # self feed
+    if data is None or data is False or "id" not in data:
+        dt_to = (
+            datetime.datetime.now().astimezone(datetime.timezone.utc) - requery_after
         )
-        if isinstance(result, Exception):
-            context.logger.error(repr(result))
-            # wait on error
-            time.sleep(DELAY)
-        elif result is False:
-            context.logger.info("Waiting for new channel to query.")
-            # wait on no data
-            time.sleep(WAIT_INTERVAL)
-        else:
-            # min wait to stagger requests
-            time.sleep(0.05)
+        data = next_channel(context, dt_to)
 
-    return "Stopped"
+    if data is not None and data is not False and "id" in data:
+        # if data is a dict, it is the channel to query
+        try:
+            start_at = datetime.datetime(2025, 1, 1).astimezone(datetime.timezone.utc)
+            # Stop two days before now in order to get more or less final reaction + view counts
+            stop_at = datetime.datetime.now().astimezone(
+                datetime.timezone.utc
+            ) - datetime.timedelta(days=2)
+
+            single_chan_messages_querier(
+                context, data, start_at, stop_at, lang_priorities
+            )
+        except Exception as e:
+            context.logger.error(
+                f"Could not get messages from channel {data.get('id')}: {repr(e)}"
+            )
+
+    # enqueue the next channel to query
+    dt_to = datetime.datetime.now().astimezone(datetime.timezone.utc) - requery_after
+    next = next_channel(context, dt_to)
+
+    # loop if no next available
+    while next is None or next is False:
+        # wait longer if no data, shorter if error
+        delay = WAIT_INTERVAL if next is None else DELAY
+        time.sleep(delay)
+        dt_to = (
+            datetime.datetime.now().astimezone(datetime.timezone.utc) - requery_after
+        )
+        next = next_channel(context, dt_to)
+
+    # send channel to be queried
+    context.logger.info("Send channel to be queried: {}".format(next.get("id")))
+
+    msg_key = str(dt_to.timestamp()) + str(next.get("id"))
+    # msg_json = json.loads(json.dumps(next))
+    # send channel to be queried
+    context.producer.send("telegram.channels_to_scrape", key=msg_key, value=next)
+
+    return True
