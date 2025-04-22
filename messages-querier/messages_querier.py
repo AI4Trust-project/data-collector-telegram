@@ -86,7 +86,7 @@ def _json_default(value):
 
 def _iceberg_json_default(value):
     if isinstance(value, datetime.datetime):
-        return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return value.isoformat()
     elif isinstance(value, set):
         return list(value)
     else:
