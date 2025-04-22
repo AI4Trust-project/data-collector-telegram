@@ -511,7 +511,7 @@ def single_chan_messages_querier(
         access_hash = data.get("access_hash", None)
         channel_username = data.get("username")
         messages_last_queried_at = data.get("messages_last_queried_at")
-        message_offset_id = data.get("last_queried_message_id")
+        message_offset_id = data.get("last_queried_message_id", 0)
         # distance from search core, as in number of hops
         distance_from_core = data.get("distance_from_core", 0)
 
