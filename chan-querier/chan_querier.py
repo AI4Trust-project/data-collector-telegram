@@ -327,7 +327,7 @@ def next_channel(context, dt_to):
 
         return data
     except Exception as e:
-        context.logger.error(repr(next))
+        context.logger.error(repr(e))
         return False
 
 
