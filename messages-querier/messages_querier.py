@@ -575,12 +575,6 @@ def single_chan_messages_querier(
         )
         anon_func = lambda x: x
 
-        update_d = {
-            "id": channel_id,
-            "messages_last_queried_at": query_info["query_date"],
-        }
-        collegram.utils.update_postgres(connection, "telegram.channels", update_d, "id")
-
         # Collect by chunks of maximum a month to limit effects of a crash on the
         # collection.
         dt_bin_edges = pl.datetime_range(
@@ -621,6 +615,7 @@ def single_chan_messages_querier(
             update_d = {
                 "id": channel_id,
                 "last_queried_message_id": last_queried_message_id,
+                "messages_last_queried_at": query_info["query_date"],
             }
             collegram.utils.update_postgres(
                 connection, "telegram.channels", update_d, "id"
