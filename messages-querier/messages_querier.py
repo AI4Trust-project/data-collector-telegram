@@ -580,6 +580,8 @@ def single_chan_messages_querier(
         dt_bin_edges = pl.datetime_range(
             dt_from, stop_at, interval="1mo", eager=True, time_zone="UTC"
         )
+        if len(dt_bin_edges) < 2:
+            dt_bin_edges = [dt_from, stop_at]
 
         forwarded_chans_stats = {}
         linked_chans_stats = {}
