@@ -232,7 +232,8 @@ def reassign_prio(chan_data, pred_dist_from_core, lang_priorities, connection):
 
     new_dist_from_core = min(pred_dist_from_core + 1, chan_data["distance_from_core"])
     lifespan_seconds = (
-        chan_data["channel_last_queried_at"] - chan_data["created_at"]
+        chan_data["query_date"].replace(tzinfo=None)
+        - chan_data["created_at"].replace(tzinfo=None)
     ).total_seconds()
     priority = collegram.channels.get_explo_priority(
         chan_data["language_code"],
@@ -278,7 +279,7 @@ def handle_linked(
         " id,"
         " parent_channel_id,"
         " created_at,"
-        " channel_last_queried_at,"
+        " query_date,"
         " language_code,"
         " nr_participants,"
         " message_count,"
@@ -333,7 +334,7 @@ def handle_linked(
 
         # If channel has already been queried by `chan-querier`, then recompute
         # priority.
-        if linked_data.get("channel_last_queried_at") is not None:
+        if linked_data.get("query_date") is not None:
             reassign_prio(linked_data, pred_dist_from_core, lang_priorities, connection)
 
 
@@ -353,7 +354,7 @@ def handle_forwarded(
         " id,"
         " parent_channel_id,"
         " created_at,"
-        " channel_last_queried_at,"
+        " query_date,"
         " language_code,"
         " nr_participants,"
         " message_count,"
@@ -398,7 +399,7 @@ def handle_forwarded(
 
         # If channel has already been queried by `chan-querier`, then recompute
         # priority.
-        if fwd_data.get("channel_last_queried_at") is not None:
+        if fwd_data.get("query_date") is not None:
             reassign_prio(fwd_data, pred_dist_from_core, lang_priorities, connection)
 
 
