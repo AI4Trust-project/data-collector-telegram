@@ -570,13 +570,13 @@ def handler(context, event):
         data = json.loads(body)
 
     # self feed
-    if data is None or data is False or "id" not in data:
+    if not isinstance(data, dict) or "id" not in data:
         dt_to = (
             datetime.datetime.now().astimezone(datetime.timezone.utc) - requery_after
         )
         data = next_channel(context, dt_to)
 
-    if data is not None and data is not False and "id" in data:
+    if isinstance(data, dict) and "id" in data:
         # if data is a dict, it is the channel to query
         try:
             single_chan_querier(context, data, lang_priorities)
@@ -587,26 +587,25 @@ def handler(context, event):
 
     # enqueue the next channel to query
     dt_to = datetime.datetime.now().astimezone(datetime.timezone.utc) - requery_after
-    next = next_channel(context, dt_to)
+    next_data = next_channel(context, dt_to)
 
     # loop if no next available
-    while next is None or next is False:
+    while not isinstance(next_data, dict):
         # wait longer if no data, shorter if error
-        delay = WAIT_INTERVAL if next is None else DELAY
+        delay = WAIT_INTERVAL if next_data is None else DELAY
         time.sleep(delay)
         dt_to = (
             datetime.datetime.now().astimezone(datetime.timezone.utc) - requery_after
         )
-        next = next_channel(context, dt_to)
+        next_data= next_channel(context, dt_to)
 
     base = get_base_dict(data)
-    next = {**next, **base}
+    next_data= {**next_data, **base}
     # send channel to be queried
-    context.logger.info("Send channel to be queried: {}".format(next.get("id")))
+    context.logger.info("Send channel to be queried: {}".format(next_data.get("id")))
 
-    msg_key = str(dt_to.timestamp()) + str(next.get("id"))
-    # msg_json = json.loads(json.dumps(next))
+    msg_key = str(dt_to.timestamp()) + str(next_data.get("id"))
     # send channel to be queried
-    context.producer.send("telegram.channels_to_query", key=msg_key, value=next)
+    context.producer.send("telegram.channels_to_query", key=msg_key, value=next_data)
 
     return True
