@@ -152,14 +152,25 @@ def gen_query_info(query_time=None):
 
 
 def gen_msg_key(row: dict):
-    return "+".join(
-        str(p)
-        for p in [
-            row.get("search_id"),
-            row["source_channel_id"],
-            row["id"],
-            row["query_id"],
-        ]
+    return (
+        "+".join(
+            str(p)
+            for p in [
+                row.get("search_id"),
+                row["source_channel_id"],
+                row["id"],
+                row["query_id"],
+            ]
+        )
+        if row.get("search_id") is not None
+        else "+".join(
+            str(p)
+            for p in [
+                row["source_channel_id"],
+                row["id"],
+                row["query_id"],
+            ]
+        )
     )
 
 
@@ -508,14 +519,25 @@ def single_chan_querier(context, data: dict, lang_priorities: dict):
 
         # send raw channel metadata to iceberg
         # TODO: put recommended channels in there or rely on RELS_TABLE?
-        channel_full_d = {**channel_full_d, **query_info, **base}
+        # NOTE: pack all nested fields into single field to avoid schema explosion
+        raw_channel_full_d = {
+            "id": chat.id,
+            "parent_channel_id": parent_channel.id,
+            "source_channel_id": source_channel_id,
+            "created_at": chat.date.astimezone(datetime.timezone.utc),
+            **query_info,
+            "raw_channel_metadata": json.dumps(channel_full_d),
+        }
+
         msg_key = gen_msg_key(row)
         producer.send(
-            "telegram.raw_channel_metadata", key=msg_key, value=channel_full_d
+            "telegram.raw_channel_metadata", key=msg_key, value=raw_channel_full_d
         )
 
-        flat_channel_d = collegram.channels.flatten_dict(channel_full_d)
         # send channel metadata to iceberg
+        flat_channel_d = collegram.channels.flatten_dict(
+            {**channel_full_d, **query_info}
+        )
         producer.send("telegram.channel_metadata", key=msg_key, value=flat_channel_d)
 
     # done.
