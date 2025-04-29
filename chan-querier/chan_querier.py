@@ -253,6 +253,15 @@ def handle_recommended(
             upsert(cur, "telegram.channels", ["id"], upsert_data)
 
 
+def get_base_dict(source_data):
+    base = {
+        "search_id": source_data.get("search_id", None),
+        "keyword_id": source_data.get("keyword_id", None),
+        "keyword": source_data.get("keyword", None),
+    }
+    return base
+
+
 def get_full_metadata(
     context,
     channel_id,
@@ -357,11 +366,7 @@ def single_chan_querier(context, data: dict, lang_priorities: dict):
     distance_from_core = data.get("distance_from_core", 0)
 
     # keep track of search
-    base = {
-        "search_id": data.get("search_id", None),
-        "keyword_id": data.get("keyword_id", None),
-        "keyword": data.get("keyword", None),
-    }
+    base = get_base_dict(data)
 
     # collect full info for channel
     src_query_info = gen_query_info()
@@ -594,6 +599,8 @@ def handler(context, event):
         )
         next = next_channel(context, dt_to)
 
+    base = get_base_dict(data)
+    next = {**next, **base}
     # send channel to be queried
     context.logger.info("Send channel to be queried: {}".format(next.get("id")))
 
