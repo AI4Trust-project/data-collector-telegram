@@ -724,6 +724,8 @@ def handler(context, event):
         )
         next_data = next_channel(context, dt_to)
 
+    # min wait to stagger requests
+    time.sleep(0.5)
     # send channel to be queried
     context.logger.info("Send channel to be queried: {}".format(next_data.get("id")))
 
