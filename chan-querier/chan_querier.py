@@ -585,6 +585,8 @@ def handler(context, event):
                 f"Could not get channel metadata from channel {data.get('id')}: {repr(e)}"
             )
 
+    # min wait to stagger requests
+    time.sleep(0.1)
     # enqueue the next channel to query
     dt_to = datetime.datetime.now().astimezone(datetime.timezone.utc) - requery_after
     next_data = next_channel(context, dt_to)
@@ -599,8 +601,6 @@ def handler(context, event):
         )
         next_data = next_channel(context, dt_to)
 
-    # min wait to stagger requests
-    time.sleep(0.1)
     base = get_base_dict(data)
     next_data = {**next_data, **base}
     # send channel to be queried
