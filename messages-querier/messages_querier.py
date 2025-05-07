@@ -516,7 +516,6 @@ def single_chan_messages_querier(
         # distance from search core, as in number of hops
         distance_from_core = data.get("distance_from_core", 0)
 
-        # TODO remove usage of s3
         data_path = Path("/telegram/")
         paths = collegram.paths.ProjectPaths(data=data_path)
         media_save_path = paths.raw_data / "media"
@@ -615,6 +614,7 @@ def single_chan_messages_querier(
                 )
             )
 
+            context.logger.info("## Updating channel query info in postgres")
             update_d = {
                 "id": channel_id,
                 "last_queried_message_id": last_queried_message_id,
@@ -623,11 +623,10 @@ def single_chan_messages_querier(
             collegram.utils.update_postgres(
                 connection, "telegram.channels", update_d, "id"
             )
-            # TODO: needed?
-            # # Save metadata about the query itself
-            # m = json.loads(json.dumps(query_info, default=_json_default))
-            # producer.send("telegram.queries", value=m)
 
+            context.logger.info(
+                f"## Handling {len(chunk_fwds_stats)} forwarded chans"
+            )
             for fwd_id, fwd_stats in chunk_fwds_stats.items():
                 prev_stats = forwarded_chans_stats.get(fwd_id)
                 end_chunk_stats = get_new_link_stats(prev_stats, fwd_stats)
@@ -643,6 +642,9 @@ def single_chan_messages_querier(
                 )
                 forwarded_chans_stats[fwd_id] = end_chunk_stats
 
+            context.logger.info(
+                f"## Handling {len(chunk_linked_chans_stats)} linked chans"
+            )
             for link_un, link_stats in chunk_linked_chans_stats.items():
                 prev_stats = linked_chans_stats.get(link_un)
                 end_chunk_stats = get_new_link_stats(prev_stats, link_stats)
@@ -659,7 +661,7 @@ def single_chan_messages_querier(
                 linked_chans_stats[link_un] = end_chunk_stats
 
         # done.
-        context.logger.info(f"Channel {channel_id} messages collected")
+        context.logger.info(f"# Channel {channel_id} messages collected")
         return True
 
     except Exception as e:
@@ -670,7 +672,6 @@ def single_chan_messages_querier(
 
 
 def handler(context, event):
-    # Triggered by chans_to_query
     nest_asyncio.apply()
     # Set relative priority for project's languages. Since the language detection is
     # surely not 100% reliable, have to allow for popular channels not detected as using
