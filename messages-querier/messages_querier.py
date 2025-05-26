@@ -527,11 +527,8 @@ def single_chan_messages_querier(
 
         query_info = gen_query_info()
         try:
-            input_chat = get_input_chan(
-                client,
-                channel_username=channel_username,
-                channel_id=channel_id,
-                access_hash=access_hash,
+            input_chat = collegram.channels.get_input_peer(
+                client, channel_username, channel_id, access_hash
             )
         except (
             ChannelInvalidError,
