@@ -628,6 +628,7 @@ def single_chan_messages_querier(
                 f"## Handling {len(chunk_fwds_stats)} forwarded chans"
             )
             for fwd_id, fwd_stats in chunk_fwds_stats.items():
+                context.logger.debug(f"### Handling forwarded {fwd_id}")
                 prev_stats = forwarded_chans_stats.get(fwd_id)
                 end_chunk_stats = get_new_link_stats(prev_stats, fwd_stats)
                 handle_forwarded(
@@ -646,6 +647,7 @@ def single_chan_messages_querier(
                 f"## Handling {len(chunk_linked_chans_stats)} linked chans"
             )
             for link_un, link_stats in chunk_linked_chans_stats.items():
+                context.logger.debug(f"### Handling linked {link_un}")
                 prev_stats = linked_chans_stats.get(link_un)
                 end_chunk_stats = get_new_link_stats(prev_stats, link_stats)
                 handle_linked(
