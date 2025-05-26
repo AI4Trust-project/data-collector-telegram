@@ -112,7 +112,6 @@ def gen_msg_key(row: dict):
         str(p)
         for p in [
             row.get("search_id"),
-            row["source_channel_id"],
             row["id"],
             row["query_id"],
         ]
