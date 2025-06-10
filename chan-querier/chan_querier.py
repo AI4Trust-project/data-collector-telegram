@@ -301,7 +301,7 @@ def get_full_metadata(
         )
         flat_channel_d = {
             "id": channel_id,
-            "access_hash": 0,
+            "access_hash": access_hash,
             "source_channel_id": source_channel_id,
             "username": channel_username,
             **base,
@@ -386,6 +386,11 @@ def single_chan_querier(context, data: dict, lang_priorities: dict):
 
     chats = [c for c in channel_full.chats if not getattr(c, "deactivated", False)]
     parent_channel = chats[0]
+    if source_channel_id is None:
+        source_channel_id = [
+            c.id for c in chats if c.username == channel_username
+        ][0]
+
     for c in chats:
         # If channelFull has more than one chat, this condition should be met for a
         # single chat. Else, channelFull corresponds to a public supergroup, and we

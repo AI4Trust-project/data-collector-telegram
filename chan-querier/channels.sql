@@ -1,7 +1,7 @@
 CREATE TABLE
     IF NOT EXISTS telegram.channels (
-        id BIGINT NOT NULL,
-        access_hash BIGINT NOT NULL,
+        id BIGINT,
+        access_hash BIGINT,
         username VARCHAR(255),
         source_channel_id BIGINT,
         parent_channel_id BIGINT,
