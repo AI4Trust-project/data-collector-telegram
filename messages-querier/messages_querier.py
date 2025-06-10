@@ -290,31 +290,20 @@ def handle_linked(
         linked_data = cur.fetchone()
 
     if linked_data is None:
-        input_peer_channel = get_input_chan(client, channel_username=linked_username)
-        if not isinstance(input_peer_channel, InputPeerChannel):
-            return
-
-        # Here there is a possibility the username changed, so check again the existence
-        # based on the ID.
-        with connection.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(base_query + f" WHERE id = {input_peer_channel.channel_id}")
-            linked_data = cur.fetchone()
-
-        if linked_data is None:
-            dist_from_core = pred_dist_from_core + 1
-            priority = collegram.channels.get_centrality_score(dist_from_core, 0, 0, 1)
-            linked_data = {
-                "id": input_peer_channel.channel_id,
-                "parent_channel_id": input_peer_channel.channel_id,
-                "access_hash": input_peer_channel.access_hash,
-                "username": linked_username,
-                "data_owner": os.environ["TELEGRAM_OWNER"],
-                "distance_from_core": dist_from_core,
-                "metadata_collection_priority": priority,
-            }
-            collegram.utils.insert_into_postgres(
-                connection, "telegram.channels", linked_data
-            )
+        dist_from_core = pred_dist_from_core + 1
+        priority = collegram.channels.get_centrality_score(dist_from_core, 0, 0, 1)
+        linked_data = {
+            "id": None,
+            "parent_channel_id": None,
+            "access_hash": None,
+            "username": linked_username,
+            "data_owner": os.environ["TELEGRAM_OWNER"],
+            "distance_from_core": dist_from_core,
+            "metadata_collection_priority": priority,
+        }
+        collegram.utils.insert_into_postgres(
+            connection, "telegram.channels", linked_data
+        )
 
     if linked_data is not None:
         # Upsert relation. If the parent ID is unknown (so didn't go through
