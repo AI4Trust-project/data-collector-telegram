@@ -164,18 +164,40 @@ def upsert_relation(
     source_parent,
     dest,
     dest_parent,
+    dest_username,
     relation,
     nr_messages,
     first_message_date,
     last_message_date,
 ):
-    cur.execute(
-        f"INSERT INTO {RELS_TABLE} (source, source_parent, destination, destination_parent, relation, nr_messages, first_discovered, last_discovered) "
-        f" VALUES({source}, {source_parent}, {dest}, {dest_parent}, '{relation}', {nr_messages}, %s, %s) "
-        " ON CONFLICT(source, destination, relation) "
-        f" DO UPDATE SET last_discovered = %s, nr_messages = {RELS_TABLE}.nr_messages + {nr_messages}",
-        [first_message_date, last_message_date, last_message_date],
+    cols = "(source, source_parent, destination, destination_parent, destination_username, relation, nr_messages, first_discovered, last_discovered)"
+    base_query = (
+        (
+            f"INSERT INTO {RELS_TABLE} {cols} "
+            f" VALUES({source}, {source_parent}, {dest}, {dest_parent}, '{dest_username}', '{relation}', {nr_messages}, %s, %s) "
+        )
+        .replace("'None'", "NULL")
+        .replace("None", "NULL")
     )
+
+    if dest is not None:
+        where = (
+            f"WHERE relation='{relation}' AND source={source} AND destination={dest}"
+        )
+    elif dest_username is not None:
+        where = f"WHERE relation='{relation}' AND source={source} AND destination_username='{dest_username}'"
+    else:
+        raise ValueError("one of destination's ID or username must be set")
+
+    cur.execute(f"SELECT {cols} FROM {RELS_TABLE} {where}")
+    rel_data = cur.fetchone()
+    if rel_data is None:
+        cur.execute(base_query, [first_message_date, last_message_date])
+    else:
+        cur.execute(
+            f"UPDATE {RELS_TABLE} SET last_discovered = %s, nr_messages = nr_messages + {nr_messages} {where}",
+            [last_message_date],
+        )
 
 
 def get_input_chan(
@@ -293,9 +315,6 @@ def handle_linked(
         dist_from_core = pred_dist_from_core + 1
         priority = collegram.channels.get_centrality_score(dist_from_core, 0, 0, 1)
         linked_data = {
-            "id": None,
-            "parent_channel_id": None,
-            "access_hash": None,
             "username": linked_username,
             "data_owner": os.environ["TELEGRAM_OWNER"],
             "distance_from_core": dist_from_core,
@@ -305,25 +324,27 @@ def handle_linked(
             connection, "telegram.channels", linked_data
         )
 
-    if linked_data is not None:
-        # Upsert relation. If the parent ID is unknown (so didn't go through
-        # `chan-querier`), consider channel as its own parent.
-        linked_parent_channel_id = linked_data["parent_channel_id"] or linked_data["id"]
-        with connection.cursor() as cur:
-            upsert_relation(
-                cur,
-                channel_id,
-                parent_channel_id,
-                linked_data["id"],
-                linked_parent_channel_id,
-                "linked",
-                **link_stats,
-            )
+    # Upsert relation. If the parent ID is unknown (so didn't go through
+    # `chan-querier`), consider channel as its own parent.
+    linked_parent_channel_id = linked_data.get("parent_channel_id") or linked_data.get(
+        "id"
+    )
+    with connection.cursor() as cur:
+        upsert_relation(
+            cur,
+            channel_id,
+            parent_channel_id,
+            linked_data.get("id"),
+            linked_parent_channel_id,
+            linked_username,
+            "linked",
+            **link_stats,
+        )
 
-        # If channel has already been queried by `chan-querier`, then recompute
-        # priority.
-        if linked_data.get("query_date") is not None:
-            reassign_prio(linked_data, pred_dist_from_core, lang_priorities, connection)
+    # If channel has already been queried by `chan-querier`, then recompute
+    # priority.
+    if linked_data.get("query_date") is not None:
+        reassign_prio(linked_data, pred_dist_from_core, lang_priorities, connection)
 
 
 def handle_forwarded(
@@ -381,6 +402,7 @@ def handle_forwarded(
                 parent_channel_id,
                 fwd_data["id"],
                 fwd_parent_channel_id,
+                None,
                 "forwarded",
                 **fwd_stats,
             )
@@ -609,9 +631,7 @@ def single_chan_messages_querier(
                 connection, "telegram.channels", update_d, "id"
             )
 
-            context.logger.info(
-                f"## Handling {len(chunk_fwds_stats)} forwarded chans"
-            )
+            context.logger.info(f"## Handling {len(chunk_fwds_stats)} forwarded chans")
             for fwd_id, fwd_stats in chunk_fwds_stats.items():
                 context.logger.debug(f"### Handling forwarded {fwd_id}")
                 prev_stats = forwarded_chans_stats.get(fwd_id)

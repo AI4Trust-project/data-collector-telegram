@@ -448,6 +448,14 @@ def single_chan_querier(context, data: dict, lang_priorities: dict):
             query_info = src_query_info
             channel_full_d = src_channel_full_d
 
+        if chat.username is not None:
+            with connection.cursor() as cur:
+                cur.execute(
+                    f"UPDATE {RELS_TABLE}"
+                    f" SET destination={chat.id}, destination_parent={parent_channel.id}"
+                    f" WHERE destination_username = '{chat.username}'",
+                )
+
         query_time = query_info["query_date"]
         channel_full_d.pop("users", None)
         channel_full_d["source_channel_id"] = source_channel_id

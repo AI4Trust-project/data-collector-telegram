@@ -4,11 +4,11 @@ CREATE TABLE
         source_parent BIGINT,
         destination BIGINT,
         destination_parent BIGINT,
+        destination_username VARCHAR(255),
         relation VARCHAR(20),
         nr_messages BIGINT,
         first_discovered TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        last_discovered TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (source, destination, relation)
+        last_discovered TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     );
 
 CREATE INDEX telegram_channels_rels_idx ON telegram.channels_rels (source);
@@ -20,3 +20,5 @@ CREATE INDEX telegram_channels_rels_reidx ON telegram.channels_rels (destination
 CREATE INDEX telegram_channels_rels_reridx ON telegram.channels_rels (destination, relation);
 
 CREATE INDEX telegram_channels_rels_uq ON telegram.channels_rels (source, destination, relation);
+
+CREATE INDEX telegram_channels_rels_uq_un ON telegram.channels_rels (source, destination_username, relation);
