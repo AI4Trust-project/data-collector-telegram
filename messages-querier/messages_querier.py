@@ -32,6 +32,32 @@ RELS_TABLE = "telegram.channels_rels"
 WAIT_INTERVAL = 60 * 60  # 1 hour
 DELAY = 10
 
+EMOJIS = ['🔥','❤','🤬','🤡','👎','👍','😱','😢','😁','😐','💯','🤮','👏','🤔','🙏','🤨','💔','🫡','❤‍🔥','😭','👀','🤝','✍','⚡','🙈','🤷‍♂','🤯','🕊','🤩','💊','💩','🏆','🥴','👌','🦄','🎅','🎄','🐳','🌭','☃','🤪','👾','🍌','👻','😎','💋','👨‍💻','💅','🌚','🤗','🖕','😍','🤣','🥱','😨','🗿','🤷‍♀','😡','🥰','🙊','🍓','🙉','😴','😈','🍾','🎉','🆒','💘','🤷','😇','🤓','😘','🎃']
+EMOJIS_NAMES = {'🔥': 'FIRE', '❤': 'HEAVY_BLACK_HEART', '🤬': 'SERIOUS_FACE_WITH_SYMBOLS_COVERING_MOUTH', '🤡': 'CLOWN_FACE', '👎': 'THUMBS_DOWN_SIGN', '👍': 'THUMBS_UP_SIGN', '😱': 'FACE_SCREAMING_IN_FEAR', '😢': 'CRYING_FACE', '😁': 'GRINNING_FACE_WITH_SMILING_EYES', '😐': 'NEUTRAL_FACE', '💯': 'HUNDRED_POINTS_SYMBOL', '🤮': 'FACE_WITH_OPEN_MOUTH_VOMITING', '👏': 'CLAPPING_HANDS_SIGN', '🤔': 'THINKING_FACE', '🙏': 'PERSON_WITH_FOLDED_HANDS', '🤨': 'FACE_WITH_ONE_EYEBROW_RAISED', '💔': 'BROKEN_HEART', '🫡': 'SALUTING_FACE', '❤\u200d🔥': 'HEAVY_BLACK_HEART', '😭': 'LOUDLY_CRYING_FACE', '👀': 'EYES', '🤝': 'HANDSHAKE', '✍': 'WRITING_HAND', '⚡': 'HIGH_VOLTAGE_SIGN', '🙈': 'SEE-NO-EVIL_MONKEY', '🤷\u200d♂': 'SHRUG', '🤯': 'SHOCKED_FACE_WITH_EXPLODING_HEAD', '🕊': 'DOVE_OF_PEACE', '🤩': 'GRINNING_FACE_WITH_STAR_EYES', '💊': 'PILL', '💩': 'PILE_OF_POO', '🏆': 'TROPHY', '🥴': 'FACE_WITH_UNEVEN_EYES_AND_WAVY_MOUTH', '👌': 'OK_HAND_SIGN', '🦄': 'UNICORN_FACE', '🎅': 'FATHER_CHRISTMAS', '🎄': 'CHRISTMAS_TREE', '🐳': 'SPOUTING_WHALE', '🌭': 'HOT_DOG', '☃': 'SNOWMAN', '🤪': 'GRINNING_FACE_WITH_ONE_LARGE_AND_ONE_SMALL_EYE', '👾': 'ALIEN_MONSTER', '🍌': 'BANANA', '👻': 'GHOST', '😎': 'SMILING_FACE_WITH_SUNGLASSES', '💋': 'KISS_MARK', '👨\u200d💻': 'MAN', '💅': 'NAIL_POLISH', '🌚': 'NEW_MOON_WITH_FACE', '🤗': 'HUGGING_FACE', '🖕': 'REVERSED_HAND_WITH_MIDDLE_FINGER_EXTENDED', '😍': 'SMILING_FACE_WITH_HEART-SHAPED_EYES', '🤣': 'ROLLING_ON_THE_FLOOR_LAUGHING', '🥱': 'YAWNING_FACE', '😨': 'FEARFUL_FACE', '🗿': 'MOYAI', '🤷\u200d♀': 'SHRUG', '😡': 'POUTING_FACE', '🥰': 'SMILING_FACE_WITH_SMILING_EYES_AND_THREE_HEARTS', '🙊': 'SPEAK-NO-EVIL_MONKEY', '🍓': 'STRAWBERRY', '🙉': 'HEAR-NO-EVIL_MONKEY', '😴': 'SLEEPING_FACE', '😈': 'SMILING_FACE_WITH_HORNS', '🍾': 'BOTTLE_WITH_POPPING_CORK', '🎉': 'PARTY_POPPER', '🆒': 'SQUARED_COOL', '💘': 'HEART_WITH_ARROW', '🤷': 'SHRUG', '😇': 'SMILING_FACE_WITH_HALO', '🤓': 'NERD_FACE', '😘': 'FACE_THROWING_A_KISS', '🎃': 'JACK-O-LANTERN'}
+
+def emoji_to_name(e):
+    if e and e[:1] in EMOJIS_NAMES:
+        return EMOJIS_NAMES[e]
+    return False
+
+
+def process_reactions(reactions):
+    if not reactions:
+        return None,None
+
+    # we loop over definition to keep full list consistent
+    processed_reactions = {EMOJIS_NAMES.get(k): 0 for k in EMOJIS_NAMES}
+    other_reactions = 0
+
+    # collect reactions
+    for reaction, count in reactions.items():
+        name = emoji_to_name(reaction)
+        if name and name in processed_reactions:
+            processed_reactions[name] = count if count else 0
+        else:
+            #increment other reactions
+            other_reactions += count if count else 0
+    return processed_reactions,other_reactions
 
 async def init_context(context):
     access_key = os.environ["MINIO_ACCESS_KEY"]
@@ -452,7 +478,9 @@ async def collect_messages(
         offset_id=offset_id,
         fs=fs,
     ):
-        m_dict = {**m.to_dict(), **query_info}
+        # m_dict = {**m.to_dict(), **query_info}
+        # raw message as nested json
+        m_dict = {"id": m.id, "date": m.date, **query_info, "raw_message": json.dumps(m.to_dict(), default=_iceberg_json_default)}
         msg_key = gen_message_msg_key(m_dict)
         # MessageService have so many potential structures that putting them together
         # with normal messages in a table does not make sense.
@@ -460,7 +488,14 @@ async def collect_messages(
             producer.send("telegram.raw_service_messages", key=msg_key, value=m_dict)
         else:
             producer.send("telegram.raw_messages", key=msg_key, value=m_dict)
-            flat_dict = collegram.messages.to_flat_dict(m)
+            # flat_dict = collegram.messages.to_flat_dict(m)
+            flat_dict = {**collegram.messages.to_flat_dict(m), **query_info}
+
+            # replace reactions with fixed structure
+            reactions, other_reactions = process_reactions(flat_dict["reactions"]) if "reactions" in flat_dict else (None, None)
+            flat_dict["reactions"] = reactions
+            flat_dict["other_reactions"] = other_reactions
+
             producer.send("telegram.messages", key=msg_key, value=flat_dict)
         last_id = m.id
     return last_id
